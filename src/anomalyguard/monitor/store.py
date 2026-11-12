@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS anomalies (
     reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_anomalies_run ON anomalies(run_id);
+CREATE INDEX IF NOT EXISTS idx_anomalies_run_row ON anomalies(run_id, row_index);
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER,
@@ -93,8 +95,38 @@ RUN_FIELDS = (
 )
 
 
+# normalised score bands (score / threshold) used for anomaly severity
+SEVERITY_BANDS = {"high": 3.0, "medium": 1.5}
+ANOMALY_SORTS = {
+    "score": "score",
+    "row": "CAST(row_index AS REAL)",
+    "column": "column_name",
+    "detector": "detector",
+    "id": "id",
+}
+ANALYSIS_PREFIX = "analysis:"
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def severity(score: float | None) -> str:
+    s = float(score or 0.0)
+    if s >= SEVERITY_BANDS["high"]:
+        return "high"
+    if s >= SEVERITY_BANDS["medium"]:
+        return "medium"
+    return "low"
+
+
+def _severity_sql(level: str) -> str:
+    hi, med = SEVERITY_BANDS["high"], SEVERITY_BANDS["medium"]
+    return {
+        "high": f"score >= {hi}",
+        "medium": f"score >= {med} AND score < {hi}",
+        "low": f"(score IS NULL OR score < {med})",
+    }[level]
 
 
 class MetricsStore:
@@ -105,7 +137,7 @@ class MetricsStore:
             conn.executescript(SCHEMA)
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -156,16 +188,94 @@ class MetricsStore:
         d.pop("metrics_json", None)
         return d
 
-    def runs(self, limit: int = 100, pipeline: str | None = None) -> list[dict[str, Any]]:
-        q = "SELECT * FROM runs"
-        params: list[Any] = []
+    @staticmethod
+    def _runs_where(
+        pipeline: str | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+        q: str | None = None,
+        since: str | None = None,
+    ) -> tuple[str, list[Any]]:
+        clauses, params = ["1=1"], []
         if pipeline:
-            q += " WHERE pipeline = ?"
+            clauses.append("pipeline = ?")
             params.append(pipeline)
-        q += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if kind == "analysis":
+            clauses.append("pipeline LIKE ?")
+            params.append(ANALYSIS_PREFIX + "%")
+        elif kind == "pipeline":
+            clauses.append("pipeline NOT LIKE ?")
+            params.append(ANALYSIS_PREFIX + "%")
+        if q:
+            clauses.append("(pipeline LIKE ? OR CAST(id AS TEXT) = ? OR error LIKE ?)")
+            params += [f"%{q}%", q, f"%{q}%"]
+        if since:
+            clauses.append("started_at >= ?")
+            params.append(since)
+        return " AND ".join(clauses), params
+
+    def runs(
+        self,
+        limit: int = 100,
+        pipeline: str | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+        q: str | None = None,
+        offset: int = 0,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where, params = self._runs_where(pipeline, status, kind, q, since)
+        sql = f"SELECT * FROM runs WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?"
         with closing(self._conn()) as conn:
-            return [self._run_row(r) for r in conn.execute(q, params).fetchall()]
+            return [
+                self._run_row(r)
+                for r in conn.execute(sql, [*params, int(limit), int(offset)]).fetchall()
+            ]
+
+    def count_runs(
+        self,
+        pipeline: str | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+        q: str | None = None,
+        since: str | None = None,
+    ) -> int:
+        where, params = self._runs_where(pipeline, status, kind, q, since)
+        with closing(self._conn()) as conn:
+            return int(
+                conn.execute(f"SELECT COUNT(*) FROM runs WHERE {where}", params).fetchone()[0]
+            )
+
+    def update_run(self, run_id: int, metrics: dict[str, Any]) -> None:
+        """Merge ``metrics`` into a finished run (columns and the metrics JSON)."""
+        with closing(self._conn()) as conn, conn:
+            row = conn.execute("SELECT metrics_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Run {run_id} not found")
+            merged = {**json.loads(row[0] or "{}"), **metrics}
+            cols = [k for k in RUN_FIELDS if k in metrics]
+            sets = "".join(f"{k} = ?, " for k in cols)
+            conn.execute(
+                f"UPDATE runs SET {sets}metrics_json = ? WHERE id = ?",
+                (*[metrics[k] for k in cols], json.dumps(merged, default=str), run_id),
+            )
+
+    def series(
+        self, pipeline: str | None = None, since: str | None = None, limit: int = 2000
+    ) -> list[dict[str, Any]]:
+        """Finished runs in time order with the metrics the overview charts need."""
+        where, params = self._runs_where(pipeline=pipeline, since=since)
+        sql = (
+            "SELECT id, pipeline, started_at, finished_at, status, rows, n_anomalies, anomaly_rate,"
+            f" quality_score FROM runs WHERE {where} AND status != 'running'"
+            " ORDER BY started_at DESC, id DESC LIMIT ?"
+        )
+        with closing(self._conn()) as conn:
+            rows = [dict(r) for r in conn.execute(sql, [*params, int(limit)]).fetchall()]
+        return rows[::-1]
 
     def get_run(self, run_id: int) -> dict[str, Any] | None:
         with closing(self._conn()) as conn:
@@ -213,20 +323,135 @@ class MetricsStore:
                 rows,
             )
 
-    def anomalies(self, run_id: int, limit: int = 500) -> list[dict[str, Any]]:
+    @staticmethod
+    def _anomalies_where(
+        run_id: int,
+        column: str | None = None,
+        detector: str | None = None,
+        severity: str | None = None,
+        row_indexes: list[Any] | None = None,
+        q: str | None = None,
+    ) -> tuple[str, list[Any]]:
+        clauses, params = ["run_id = ?"], [run_id]
+        if column == "(row)":
+            clauses.append("column_name IS NULL")
+        elif column:
+            clauses.append("column_name = ?")
+            params.append(column)
+        if detector:
+            clauses.append("detector = ?")
+            params.append(detector)
+        if severity:
+            levels = [s for s in str(severity).split(",") if s in SEVERITY_BANDS or s == "low"]
+            if levels:
+                clauses.append("(" + " OR ".join(_severity_sql(s) for s in levels) + ")")
+        if row_indexes is not None:
+            marks = ",".join("?" * len(row_indexes)) or "NULL"
+            clauses.append(f"row_index IN ({marks})")
+            params += [json.dumps(i, default=str) for i in row_indexes]
+        if q:
+            clauses.append("(reason LIKE ? OR value LIKE ?)")
+            params += [f"%{q}%", f"%{q}%"]
+        return " AND ".join(clauses), params
+
+    @staticmethod
+    def _anomaly_row(r: sqlite3.Row) -> dict[str, Any]:
+        d = dict(r)
+        d["row_index"] = json.loads(d["row_index"]) if d["row_index"] else None
+        d["value"] = json.loads(d["value"]) if d["value"] else None
+        d["column"] = d.pop("column_name")
+        d["severity"] = severity(d.get("score"))
+        return d
+
+    def anomalies(
+        self,
+        run_id: int,
+        limit: int = 500,
+        offset: int = 0,
+        column: str | None = None,
+        detector: str | None = None,
+        severity: str | None = None,
+        row_indexes: list[Any] | None = None,
+        q: str | None = None,
+        sort: str = "score",
+        descending: bool = True,
+    ) -> list[dict[str, Any]]:
+        where, params = self._anomalies_where(run_id, column, detector, severity, row_indexes, q)
+        order = ANOMALY_SORTS.get(sort, "score")
+        direction = "DESC" if descending else "ASC"
         with closing(self._conn()) as conn:
             rows = conn.execute(
-                "SELECT * FROM anomalies WHERE run_id = ? ORDER BY score DESC LIMIT ?",
-                (run_id, limit),
+                f"SELECT * FROM anomalies WHERE {where} ORDER BY {order} {direction}, id"
+                " LIMIT ? OFFSET ?",
+                [*params, int(limit), int(offset)],
             ).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            d["row_index"] = json.loads(d["row_index"]) if d["row_index"] else None
-            d["value"] = json.loads(d["value"]) if d["value"] else None
-            d["column"] = d.pop("column_name")
-            out.append(d)
-        return out
+        return [self._anomaly_row(r) for r in rows]
+
+    def count_anomalies(
+        self,
+        run_id: int,
+        column: str | None = None,
+        detector: str | None = None,
+        severity: str | None = None,
+        q: str | None = None,
+    ) -> int:
+        where, params = self._anomalies_where(run_id, column, detector, severity, None, q)
+        with closing(self._conn()) as conn:
+            return int(
+                conn.execute(f"SELECT COUNT(*) FROM anomalies WHERE {where}", params).fetchone()[0]
+            )
+
+    def anomalous_rows(
+        self,
+        run_id: int,
+        column: str | None = None,
+        detector: str | None = None,
+        severity: str | None = None,
+        q: str | None = None,
+        sort: str = "score",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[Any], int]:
+        """Distinct row indexes with matching findings (highest score or row order first)."""
+        where, params = self._anomalies_where(run_id, column, detector, severity, None, q)
+        order = "MAX(score) DESC" if sort == "score" else "CAST(row_index AS REAL), row_index"
+        with closing(self._conn()) as conn:
+            total = conn.execute(
+                f"SELECT COUNT(DISTINCT row_index) FROM anomalies WHERE {where}", params
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT row_index FROM anomalies WHERE {where} GROUP BY row_index ORDER BY {order}"
+                " LIMIT ? OFFSET ?",
+                [*params, int(limit), int(offset)],
+            ).fetchall()
+        return [json.loads(r[0]) if r[0] else None for r in rows], int(total)
+
+    def anomaly_breakdown(self, run_id: int) -> dict[str, Any]:
+        """Stored findings per column, detector and severity (for charts and filters)."""
+        hi, med = SEVERITY_BANDS["high"], SEVERITY_BANDS["medium"]
+        with closing(self._conn()) as conn:
+            by_col = conn.execute(
+                "SELECT COALESCE(column_name, '(row)'), COUNT(*) FROM anomalies WHERE run_id = ?"
+                " GROUP BY 1 ORDER BY 2 DESC",
+                (run_id,),
+            ).fetchall()
+            by_det = conn.execute(
+                "SELECT detector, COUNT(*) FROM anomalies WHERE run_id = ? GROUP BY 1 ORDER BY 2 DESC",
+                (run_id,),
+            ).fetchall()
+            sev = conn.execute(
+                f"SELECT SUM(score >= {hi}), SUM(score >= {med} AND score < {hi}),"
+                f" SUM(score IS NULL OR score < {med}), COUNT(*), COUNT(DISTINCT row_index)"
+                " FROM anomalies WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return {
+            "by_column": {k: n for k, n in by_col},
+            "by_detector": {k: n for k, n in by_det},
+            "by_severity": {"high": sev[0] or 0, "medium": sev[1] or 0, "low": sev[2] or 0},
+            "findings": sev[3] or 0,
+            "rows": sev[4] or 0,
+        }
 
     def get_anomaly(self, anomaly_id: int) -> dict[str, Any] | None:
         with closing(self._conn()) as conn:
@@ -255,14 +480,15 @@ class MetricsStore:
                 ],
             )
 
-    def alerts(self, limit: int = 100) -> list[dict[str, Any]]:
+    def alerts(self, limit: int = 100, run_id: int | None = None) -> list[dict[str, Any]]:
+        q, params = "SELECT a.*, r.pipeline FROM alerts a LEFT JOIN runs r ON r.id = a.run_id", []
+        if run_id is not None:
+            q += " WHERE a.run_id = ?"
+            params.append(run_id)
+        q += " ORDER BY a.id DESC LIMIT ?"
+        params.append(int(limit))
         with closing(self._conn()) as conn:
-            return [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (limit,)
-                ).fetchall()
-            ]
+            return [dict(r) for r in conn.execute(q, params).fetchall()]
 
     # -- feedback & thresholds -----------------------------------------
     def add_feedback(
@@ -332,6 +558,11 @@ class MetricsStore:
                 " reason = excluded.reason, last_feedback_id = excluded.last_feedback_id",
                 (detector, multiplier, now_iso(), reason, last),
             )
+
+    def delete_threshold(self, detector: str) -> bool:
+        with closing(self._conn()) as conn, conn:
+            cur = conn.execute("DELETE FROM thresholds WHERE detector = ?", (detector,))
+            return cur.rowcount > 0
 
     def threshold_details(self) -> list[dict[str, Any]]:
         with closing(self._conn()) as conn:

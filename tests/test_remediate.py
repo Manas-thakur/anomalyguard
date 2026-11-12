@@ -165,7 +165,7 @@ def test_review_queue(tmp_path):
         suggestion_confidence=0.9,
     )
     b = q.add("qty", -1, "negative", row_index=5, pipeline="p")
-    assert q.counts() == {"pending": 2, "approved": 0, "rejected": 0}
+    assert q.counts() == {"pending": 2, "approved": 0, "rejected": 0, "applied": 0}
     assert q.approve(a)["resolved_value"] == 99.0  # defaults to the suggestion
     assert q.reject(b, note="real refund")["status"] == "rejected"
     assert q.counts()["approved"] == 1

@@ -135,3 +135,20 @@ def test_demo_commands(tmp_path, capsys):
 def test_errors_are_reported(capsys):
     assert main(["detect", "does-not-exist.csv"]) == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_doctor(tmp_path, capsys):
+    db = tmp_path / "state" / "ag.db"
+    pdir = tmp_path / "pipelines"
+    pdir.mkdir()
+    shutil.copy(EXAMPLES / "pipeline.yaml", pdir / "pipeline.yaml")
+    (pdir / "broken.yaml").write_text("name: broken\nsource: {type: csv}\nnope: 1\n")
+    assert main(["doctor", "--db", str(db), "--pipeline-dir", str(pdir)]) == 0
+    out = capsys.readouterr().out
+    assert "AnomalyGuard" in out and "Extras" in out and "orders_quality" in out
+    assert "invalid pipeline" in out and "ANOMALYGUARD_API_KEY" in out
+    assert not db.exists()  # doctor does not create the database
+    assert main(["doctor", "--db", str(db), "--pipeline-dir", str(pdir), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["state"]["writable"] and data["extras"]["server"]["installed"]
+    assert any(not p["valid"] for p in data["pipelines"]) and data["problems"]

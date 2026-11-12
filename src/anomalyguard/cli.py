@@ -353,21 +353,111 @@ def cmd_demo_benchmark(args: argparse.Namespace) -> int:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     try:
+        import multipart  # noqa: F401  (python-multipart, needed for uploads)
         import uvicorn
 
         from anomalyguard.monitor.api import create_app
+        from anomalyguard.monitor.settings import ServerSettings
     except ImportError:
         print(
-            "The dashboard needs the server extra: pip install 'anomalyguard[server]'",
+            "The web app needs the server extra: pip install 'anomalyguard[server]'",
             file=sys.stderr,
         )
         return 1
-    app = create_app(args.db)
+    settings = ServerSettings.from_env()
+    if args.pipeline_dir:
+        settings.pipeline_dirs = [Path(d) for d in args.pipeline_dir]
+    if args.max_upload_mb is not None:
+        settings.max_upload_mb = args.max_upload_mb
+    app = create_app(args.db, settings)
+    auth = "API key required" if settings.auth_enabled else "no API key"
     print(
-        f"AnomalyGuard dashboard on http://{args.host}:{args.port}  (db: {args.db}, Ctrl+C to stop)"
+        f"AnomalyGuard on http://{args.host}:{args.port}  (db: {args.db}, {auth}, Ctrl+C to stop)"
     )
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not settings.auth_enabled:
+        print(
+            "warning: listening on a non-local address without ANOMALYGUARD_API_KEY set",
+            file=sys.stderr,
+        )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from anomalyguard.monitor import doctor
+    from anomalyguard.monitor.settings import ServerSettings
+
+    dirs = (
+        [Path(d) for d in args.pipeline_dir]
+        if args.pipeline_dir
+        else ServerSettings.from_env().pipeline_dirs
+    )
+    info = doctor.collect(args.db, dirs)
+    problems = []
+    st = info["state"]
+    if not st["writable"]:
+        problems.append(f"state directory {st['state_dir']} is not writable")
+    if not info["extras"]["server"]["installed"]:
+        problems.append("server extra missing: anomalyguard serve will not start")
+    bad = [p for p in info["pipelines"] if not p["valid"]]
+    for p in bad:
+        problems.append(f"invalid pipeline {p['file']}: {p['error']}")
+    for entry in info["notifiers"]:
+        for n in entry.get("notifiers", []):
+            if not n["ok"]:
+                problems.append(f"{entry['pipeline']}: {n['type']} notifier: {n['detail']}")
+    if args.json:
+        print(json.dumps({**info, "problems": problems}, indent=2, default=str))
+        return 1 if not st["writable"] else 0
+
+    def mark(ok: bool) -> str:
+        return "ok  " if ok else "!!  "
+
+    print(f"AnomalyGuard {info['version']}  (Python {info['python']}, {info['platform']})")
+    print(f"  executable: {info['executable']}")
+    print("\nState")
+    print(f"  {mark(st['writable'])}directory  {st['state_dir']}")
+    db_line = "present" if st["db_exists"] else "not created yet (first run creates it)"
+    print(f"  {mark(True)}database   {st['db']} ({db_line})")
+    if st["runs"] is not None:
+        print(
+            f"      runs: {st['runs']}, review pending: {st['review_pending']}, "
+            f"uploads: {st['uploads']}"
+        )
+    print("\nExtras")
+    for name, e in info["extras"].items():
+        detail = "installed" if e["installed"] else f"missing {', '.join(e['missing'])}"
+        print(f"  {mark(e['installed'])}{name:<8} {detail}")
+    print("\nEnvironment")
+    for e in info["env"]:
+        value = "set" if e["set"] else "not set"
+        if e["value"]:
+            value = f"= {e['value']}"
+        print(f"      {e['name']:<28} {value:<14} {e['purpose']}")
+    print("\nPipelines")
+    for d in info["pipeline_dirs"]:
+        state = "" if d["exists"] else " (not created yet)"
+        print(f"  {'ok  ' if d['exists'] else '--  '}folder {d['path']}{state}")
+    for p in info["pipelines"]:
+        print(f"  {mark(p['valid'])}{p['name'] or '?':<20} {p['file']}")
+        if p["error"]:
+            print(f"        {p['error']}")
+    if info["notifiers"]:
+        print("\nNotifiers")
+        for entry in info["notifiers"]:
+            for n in entry.get("notifiers", []):
+                print(
+                    f"  {mark(n['ok'])}{entry['pipeline']:<20} {n['type']:<8} "
+                    f">= {n['min_severity']:<8} {n['detail']}"
+                )
+    print()
+    if problems:
+        print(f"{len(problems)} problem(s):")
+        for p in problems:
+            print(f"  - {p}")
+    else:
+        print("No problems found.")
+    return 1 if not st["writable"] else 0
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -593,11 +683,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_demo_benchmark)
 
-    sp = sub.add_parser("serve", help="start the monitoring dashboard (needs anomalyguard[server])")
+    sp = sub.add_parser("serve", help="start the web app and REST API (needs anomalyguard[server])")
     sp.add_argument("--db", default=DEFAULT_DB)
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8765)
+    sp.add_argument(
+        "--pipeline-dir",
+        action="append",
+        help="folder with pipeline YAML files (repeatable; default: pipelines, examples)",
+    )
+    sp.add_argument("--max-upload-mb", type=float, help="upload size limit (default 100)")
     sp.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser("doctor", help="check the environment, state, extras and notifiers")
+    sp.add_argument("--db", default=DEFAULT_DB)
+    sp.add_argument("--pipeline-dir", action="append", help="folder with pipeline YAML files")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("review", help="list/approve/reject flagged values")
     sp.add_argument("action", choices=["list", "approve", "reject"])

@@ -22,13 +22,15 @@ def run_detectors(
     combine: Literal["any", "vote", "all"] = "any",
     min_votes: int = 1,
     threshold_multipliers: dict[str, float] | None = None,
+    threshold_scale: float = 1.0,
 ) -> AnomalyReport:
     """Fit each detector on ``df`` and score it, returning an :class:`AnomalyReport`.
 
     ``methods`` may be names (``"mad,iforest"``), spec dicts or Detector instances.
     ``columns``/``group_by`` apply to specs that do not set them. With
     ``time_column`` the frame is sorted by time before detection (results are
-    mapped back to the original row order).
+    mapped back to the original row order). ``threshold_scale`` multiplies
+    every detector's threshold (below 1 flags more, above 1 flags less).
     """
     if methods is None:
         methods = list(DEFAULT_METHODS)
@@ -58,6 +60,8 @@ def run_detectors(
             det.threshold_multiplier = threshold_multipliers.get(
                 det.name, threshold_multipliers.get(base_name, 1.0)
             )
+        if threshold_scale != 1.0:
+            det.threshold_multiplier *= float(threshold_scale)
         res = det.detect(work)
         if order is not None:
             # map sorted positions back to the original positions

@@ -6,7 +6,18 @@
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-AnomalyGuard reads data from files, databases, APIs or streams. It validates the data against a schema, finds anomalies with statistical, ML, time-series and contextual detectors, and fixes what is safe to fix. Anything it can't fix safely goes to a human review queue. It sends alerts when quality drops and records every run in a small dashboard, where false-positive feedback adjusts detector thresholds.
+AnomalyGuard reads data from files, databases, APIs or streams. It validates the data against a schema, finds anomalies with statistical, ML, time-series and contextual detectors, and fixes what is safe to fix. Anything it can't fix safely goes to a human review queue. It sends alerts when quality drops and records every run, and a web app lets you upload a file, see every anomaly with its reason, preview fixes, download the cleaned data, work through the review queue and run pipelines. False-positive feedback adjusts detector thresholds.
+
+![Analysis results: anomalous cells tinted by severity, with findings by column and detector](docs/screenshots/analyze-results.png)
+
+## Features
+
+- **Analyze a file in the browser.** Drag in a CSV, TSV, JSON, JSONL or Parquet file, get an inferred schema, per-column statistics and a quality score, pick detectors (optionally per group, for contextual anomalies) and a sensitivity, and browse the data with every anomalous cell highlighted and explained.
+- **Preview fixes before you take them.** Choose a strategy per column (cap, winsorize, median, flag, drop, ...), see a before/after diff of every changed cell, then download the cleaned CSV and a Markdown or JSON report.
+- **Review queue that scales.** Server-side paging and filters, select-all, bulk approve / reject / apply / mark false positive, and a drawer with the full row and an editable final value.
+- **Pipelines.** Declarative YAML pipelines (source, schema, detectors, remediation, alerts, sink, schedule), runnable from the CLI, a scheduler, or the web app as background jobs.
+- **Monitoring.** Every run and analysis is recorded in SQLite; the overview charts anomaly rate and quality over time per pipeline, and alerts go to the console, files, webhooks, Slack or email.
+- **From-scratch algorithms.** Isolation Forest, LOF, k-NN, Grubbs, CUSUM, EWMA and seasonal decomposition in plain NumPy.
 
 ## Philosophy
 
@@ -15,7 +26,7 @@ Most AI systems fail because of bad data, not bad models. AnomalyGuard is a modu
 - **From scratch, readable algorithms.** The plans in [`plans/`](plans/) call for components built from scratch. Isolation Forest, LOF, k-NN distance, Grubbs, CUSUM, EWMA and seasonal decomposition are all implemented in plain NumPy. SciPy supplies only the t-distribution and KD-tree neighbour search. scikit-learn is not required.
 - **Every flag has a reason.** Each anomaly names the detector, the column and the value, and explains why it was flagged, for example `[region=north] unit_price=157.1 has modified z-score 77.1 vs median 19.89 (threshold 3.5)`.
 - **Fix only what is safe, and flag the rest.** Remediation policies are set per column. Values that a robust cap can't move, such as contextual anomalies, go to a review queue instead of being rewritten silently.
-- **Small and local.** It's one Python package backed by SQLite, and the dashboard needs no build step.
+- **Small and local.** It's one Python package backed by SQLite, and the web app needs no build step.
 
 ## Architecture
 
@@ -38,7 +49,7 @@ remediate  dedupe, type fixes, impute, cap/winsorize/clip, drop, flag -> review 
 alert      rules on run metrics -> console, JSONL file, webhook, Slack, email (rate-limited, deduplicated)
     |
     v
-monitor    SQLite metrics store, FastAPI + static dashboard, feedback loop -> threshold tuning
+monitor    SQLite metrics store, FastAPI + web app, background jobs, feedback loop -> threshold tuning
 ```
 
 The `pipeline` package wires these stages together from a YAML file, adds a sink, persisted state and an interval scheduler. The `demo` package generates labelled synthetic data and benchmarks every detector.
@@ -51,13 +62,18 @@ Requires Python 3.10 or newer.
 # library + CLI
 pip install "git+https://github.com/Manas-thakur/anomalyguard"
 
-# with the dashboard server, Parquet and SQLAlchemy (PostgreSQL/MySQL/...) support
+# with the web app, Parquet and SQLAlchemy (PostgreSQL/MySQL/...) support
 pip install "anomalyguard[server,parquet,sql] @ git+https://github.com/Manas-thakur/anomalyguard"
+
+# or run the container image (web app on http://localhost:8765)
+docker run --rm -p 8765:8765 -v "$PWD/.anomalyguard:/data/.anomalyguard" ghcr.io/manas-thakur/anomalyguard
 ```
+
+Once a release has been published to PyPI, `pip install "anomalyguard[server]"` works too (see [Releasing](#releasing)).
 
 | Extra | Adds | Needed for |
 |---|---|---|
-| `server` | fastapi, uvicorn | `anomalyguard serve` (dashboard + REST API) |
+| `server` | fastapi, uvicorn, python-multipart | `anomalyguard serve` (web app + REST API, uploads) |
 | `parquet` | pyarrow | Parquet sources and sinks |
 | `sql` | sqlalchemy | non-SQLite databases (SQLite works without it) |
 | `all` | all of the above | |
@@ -89,9 +105,14 @@ uv run anomalyguard fix examples/data/orders.csv -o out/orders_clean.csv --group
 # 4. Run a declarative pipeline (validation, detection, remediation, alerts, sink, metrics)
 uv run anomalyguard run examples/pipeline.yaml
 
-# 5. Open the dashboard at http://127.0.0.1:8765
+# 5. Open the web app at http://127.0.0.1:8765
 uv run anomalyguard serve
+
+# Check the environment, state directory, extras and notifier secrets
+uv run anomalyguard doctor
 ```
+
+In the web app, **Analyze** walks through the same steps for an uploaded file: upload `examples/data/orders.csv`, read the profile, pick `mad` + `iforest` grouped by `region`, open the results, preview fixes on the **Fix & export** tab and download the cleaned CSV.
 
 If you installed with pip, drop the `uv run` prefix. Example output from step 2:
 
@@ -129,7 +150,8 @@ anomalyguard run pipeline.yaml --schedule                       # repeat on the 
 | `anomalyguard init [-t csv_quality\|timeseries_monitor\|database_quality] [--source ...] [-o pipeline.yaml]` | Write a starter pipeline (`--list` shows templates) |
 | `anomalyguard demo generate [-d orders\|sensor\|tabular] [-n ROWS] [-o out.csv]` | Generate synthetic data with ground-truth labels |
 | `anomalyguard demo benchmark [--datasets tabular,orders,sensor] [-o results.md]` | Precision, recall, F1 and ROC-AUC of every detector |
-| `anomalyguard serve [--db .anomalyguard/anomalyguard.db] [--host] [--port 8765]` | Dashboard and REST API (needs the `[server]` extra) |
+| `anomalyguard serve [--db .anomalyguard/anomalyguard.db] [--host] [--port 8765] [--pipeline-dir DIR ...] [--max-upload-mb N]` | Web app and REST API (needs the `[server]` extra) |
+| `anomalyguard doctor [--db ...] [--pipeline-dir DIR ...] [--json]` | Check the state directory, database, extras, pipeline files, notifier secrets and server settings |
 | `anomalyguard review list\|approve ID [--value V]\|reject ID` | Work through the human review queue |
 | `anomalyguard feedback fp\|tp --anomaly-id N`, `feedback stats`, `feedback tune` | Record false and true positives and retune thresholds |
 | `anomalyguard detectors` | List the available detectors |
@@ -263,7 +285,7 @@ sink:
 
 monitor:
   # db: .anomalyguard/anomalyguard.db
-  store_anomalies: 1000              # findings kept per run for the dashboard
+  store_anomalies: 1000              # findings kept per run for the web app
   auto_tune: false                   # apply feedback-based threshold tuning after each run
 
 state:
@@ -364,55 +386,97 @@ The pipeline works through each problem type in order:
    - A value that `cap` can't move, such as a contextual anomaly, is flagged instead.
 4. **Schema constraints**: values outside `min`/`max` are clipped. Categories are fixed when they differ only in case or whitespace. Other disallowed values are flagged.
 5. **Missing values**: the `auto` policy uses the median for numbers and the mode for categoricals, and flags ids, free text and datetimes.
-6. **Review queue**: everything flagged goes to SQLite. Approve or reject items in the dashboard, with `anomalyguard review` or with `ReviewQueue`. `ReviewQueue.apply(df)` writes the approved values back.
+6. **Review queue**: everything flagged goes to SQLite. Approve or reject items in the web app, with `anomalyguard review` or with `ReviewQueue`. `ReviewQueue.apply(df)` writes the approved values back.
 
 The optional `LLMSuggester` sends the full record and the problem to Ollama (`/api/generate`) or to any OpenAI-compatible `/chat/completions` endpoint, and attaches a `{value, confidence, rationale}` suggestion to the review item. It is off by default. It applies a suggestion automatically only when `auto_apply: true` is set and the confidence is at least `min_confidence`.
 
-## Dashboard and feedback loop
+## Web app
 
-`anomalyguard serve` starts a FastAPI app. It serves one static HTML page with no build step and no CDN: the charts are inline SVG, and light and dark themes are supported. The page shows:
+`anomalyguard serve` starts a FastAPI app that serves the web app (plain HTML, CSS and ES modules in `src/anomalyguard/monitor/static/`, no build step, no JavaScript from a CDN) and the REST API. It follows the system light/dark preference, with a toggle in the sidebar, and works down to phone width.
 
-- summary cards
-- anomaly rate and quality score over time
-- the runs table, with drill-down into each run's anomalies and their reasons
-- **False positive** and **Confirm** buttons on each anomaly
-- the review queue, with approve (optionally with a corrected value) and reject
-- feedback precision and current threshold multipliers per detector
-- recent alerts
+| Page | What you can do |
+|---|---|
+| **Overview** | Totals, anomaly rate and quality score over time (one series per pipeline, real time axis), recent runs and alerts |
+| **Analyze** | Upload a file, profile it, choose detectors / group-by / sensitivity, browse highlighted results, preview remediation per column, download the cleaned CSV and reports, send flagged values to review |
+| **Runs** | Filter every run and analysis; open a run for KPIs, findings by column and detector, a sortable anomaly table with feedback buttons, remediation summary, alerts sent and artifact downloads |
+| **Review queue** | Page and filter items by status, source, column and detector; select all matching items; bulk approve, reject, apply or mark as false positive; edit the final value in the item drawer |
+| **Pipelines** | List pipeline YAML files, edit and validate them, run one now as a background job, create a pipeline from a template |
+| **Settings** | Server configuration, API key status, detector threshold multipliers and tuning, notifier and environment status |
 
-**Feedback loop.** Feedback is stored per detector. `feedback tune` (or the **Tune thresholds** button) needs at least 3 new reviews for a detector. If its precision over those reviews is below 80%, its threshold multiplier rises by 15%. If precision is at least 95%, the multiplier relaxes back toward 1.0. The next pipeline run applies the multipliers, and so does every run when `monitor.auto_tune: true` is set.
+| Overview (dark) | Review queue |
+|---|---|
+| ![Overview with anomaly rate and quality charts](docs/screenshots/overview.png) | ![Review queue with filters](docs/screenshots/review-queue.png) |
 
-REST endpoints (OpenAPI docs at `/api/docs`):
+Uploaded files and analysis artifacts live under the state directory (`.anomalyguard/uploads/` and `.anomalyguard/analyses/`). Every analysis is also recorded as a run named `analysis:<file>`, so it shows up next to pipeline runs and its findings take part in the feedback loop.
+
+**Feedback loop.** Feedback is stored per detector. `feedback tune` (or **Tune from feedback** in Settings) needs at least 3 new reviews for a detector. If its precision over those reviews is below 80%, its threshold multiplier rises by 15%. If precision is at least 95%, the multiplier relaxes back toward 1.0. The next pipeline run and every new analysis apply the multipliers, and so does every run when `monitor.auto_tune: true` is set. Multipliers can also be set by hand in Settings.
+
+**Applying review decisions.** Approving an item records the value to use. **Apply** writes approved values into the cleaned CSV of the analysis the item came from and marks them `applied`. Items from pipeline runs stay `approved`; write them back with `ReviewQueue.apply(df)` in your own code.
+
+## REST API
+
+OpenAPI docs are served at `/api/docs`. When `ANOMALYGUARD_API_KEY` is set, every `/api/*` request needs the key in an `X-API-Key` header (or `Authorization: Bearer <key>`); `/health`, `/api/auth` and the page itself stay open. List endpoints return a JSON array and put the total number of matches in the `X-Total-Count` header.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | liveness |
+| GET | `/health` | liveness and version |
+| GET | `/api/auth` | whether a key is required and whether this request has a valid one |
 | GET | `/api/summary` | totals, pipelines, last run, review counts, thresholds |
-| GET | `/api/runs?limit=&pipeline=` / `/api/runs/{id}` / `/api/runs/{id}/anomalies` | run history and findings |
-| GET | `/api/alerts` | recent alerts |
-| GET / POST | `/api/review?status=` / `/api/review/{id}/approve` / `/api/review/{id}/reject` | review queue |
+| GET | `/api/metrics/series?pipeline=&days=&kind=` | run metrics over time, grouped per pipeline |
+| GET | `/api/runs?limit=&offset=&pipeline=&status=&kind=analysis\|pipeline&q=` | run history |
+| GET | `/api/runs/{id}` | one run with breakdowns, alerts and artifact names |
+| GET | `/api/runs/{id}/anomalies?limit=&offset=&column=&detector=&severity=&sort=&order=` | stored findings |
+| GET | `/api/runs/{id}/artifacts/{name}` | download a run output (cleaned data, reports) |
+| GET | `/api/alerts?run_id=` | recent alerts |
+| POST | `/api/datasets` | upload a file (multipart field `file`) |
+| GET / DELETE | `/api/datasets`, `/api/datasets/{id}` | list, inspect or delete uploads |
+| GET | `/api/datasets/{id}/profile`, `/api/datasets/{id}/rows` | profile and raw rows |
+| POST | `/api/analyses?wait=` | start an analysis job: `{"dataset_id", "detectors", "group_by", "columns", "sensitivity", "combine", "time_column"}` |
+| GET | `/api/analyses`, `/api/analyses/{id}` | analyses and their summaries |
+| GET | `/api/analyses/{id}/rows?offset=&limit=&only_anomalous=&column=&detector=&severity=&sort=` | data rows with findings per cell |
+| POST | `/api/analyses/{id}/remediate` | preview a remediation policy and write the cleaned file and reports |
+| GET | `/api/analyses/{id}/changes?offset=&limit=&column=` | the cell-level diff |
+| POST | `/api/analyses/{id}/review` | send the flagged values to the review queue |
+| GET | `/api/analyses/{id}/download/{cleaned.csv\|remediation.md\|remediation.json\|anomalies.json\|schema.yaml}` | downloads |
+| GET | `/api/jobs`, `/api/jobs/{id}` | background job status, progress and result |
+| GET | `/api/review?status=pending\|approved\|rejected\|applied\|all&pipeline=&column=&detector=&run_id=&q=&offset=&limit=` | review items |
+| GET | `/api/review/facets`, `/api/review/{id}` | filter values and counts; one item with its row and findings |
+| POST | `/api/review/{id}/approve`, `/reject`, `/false-positive` | resolve one item (`{"value": ...}` to override) |
+| POST | `/api/review/bulk` | `{"action": "approve\|reject\|apply\|false_positive", "ids": [...]}` or `{"action", "all_matching": true, "filter": {...}}` |
 | POST / GET | `/api/feedback` | record feedback (`anomaly_id`, `label`) / precision per detector |
 | POST | `/api/feedback/tune` | adjust thresholds from feedback |
-| GET | `/api/thresholds` | current multipliers |
-
-The original plan called for a React and TypeScript dashboard. It was replaced by this single self-contained page so that the project installs with `pip` alone.
+| GET / PUT / DELETE | `/api/thresholds`, `/api/thresholds/{detector}` | read, set (`{"multiplier": 1.3}`) or reset multipliers |
+| GET | `/api/detectors` | available detectors |
+| GET / POST | `/api/pipelines`, `/api/pipelines/templates` | list pipelines; create one from a template (`{"name", "template", "source": "path" \| "dataset:<id>", "group_by", ...}`) |
+| GET / PUT | `/api/pipelines/{id}` | YAML, summary and recent runs; save edited YAML |
+| POST | `/api/pipelines/validate`, `/api/pipelines/{id}/validate` | validate YAML |
+| POST | `/api/pipelines/{id}/run?wait=` | run now as a background job |
+| GET | `/api/settings` | server settings, state, extras, notifiers, environment (no secret values) |
 
 ## Configuration
 
-| Setting | Where |
-|---|---|
-| Metrics DB, review queue | `.anomalyguard/anomalyguard.db` (override with `monitor.db` and `review.db`, or `--db`) |
-| Checkpoints, run counters, alert history | `.anomalyguard/state/` (override with `state.dir`) |
-| Secrets | Read from environment variables: `${VAR}` in YAML, `api_key_env`, `password_env`, `url_env` |
-| SMTP password | `ANOMALYGUARD_SMTP_PASSWORD` (default `password_env`) |
-| LLM key | `OPENAI_API_KEY` (default `api_key_env` for `provider: openai`) |
-| Logging | `anomalyguard -v ...` for debug logs and full tracebacks |
+| Setting | Where | Default |
+|---|---|---|
+| Metrics DB, review queue, jobs | `.anomalyguard/anomalyguard.db` (override with `monitor.db` / `review.db` in a pipeline, or `serve --db`) | |
+| Uploads and analysis artifacts | `uploads/` and `analyses/` next to the DB | |
+| Checkpoints, run counters, alert history | `.anomalyguard/state/` (override with `state.dir`) | |
+| `ANOMALYGUARD_API_KEY` | API key required by the web app and API | unset: no key |
+| `ANOMALYGUARD_CORS_ORIGINS` | comma-separated origins allowed to call the API from other sites | unset: same origin only |
+| `ANOMALYGUARD_MAX_UPLOAD_MB` | largest accepted upload (or `serve --max-upload-mb`) | `100` |
+| `ANOMALYGUARD_PIPELINE_DIRS` | comma-separated folders scanned for pipeline YAML (or `serve --pipeline-dir`, repeatable); the first one receives pipelines created in the UI | `pipelines,examples` |
+| `ANOMALYGUARD_WORKERS` | background job threads | `2` |
+| Secrets in pipelines | `${VAR}` in YAML, `api_key_env`, `password_env`, `url_env` | |
+| `ANOMALYGUARD_SMTP_PASSWORD` | SMTP password (default `password_env`) | |
+| `OPENAI_API_KEY` | LLM key (default `api_key_env` for `provider: openai`) | |
+| Logging | `anomalyguard -v ...` for debug logs and full tracebacks | |
+
+`serve` warns when it listens on a non-local address without an API key. Behind a reverse proxy, terminate TLS at the proxy and keep the key set.
 
 ## Docker
 
 ```bash
-docker build -t anomalyguard .
-docker run --rm -p 8765:8765 -v "$PWD/.anomalyguard:/data/.anomalyguard" anomalyguard        # dashboard
+docker build -t anomalyguard .                                                                # or use ghcr.io/manas-thakur/anomalyguard
+docker run --rm -p 8765:8765 -e ANOMALYGUARD_API_KEY=change-me -v "$PWD/.anomalyguard:/data/.anomalyguard" anomalyguard   # web app
 docker run --rm anomalyguard detect examples/data/orders.csv --group-by region                 # bundled example
 docker run --rm -v "$PWD:/data" anomalyguard run pipeline.yaml                                  # your pipeline
 ```
@@ -428,7 +492,9 @@ src/anomalyguard/
                registry.py, runner.py, report.py, evaluation.py
   remediate/   strategies.py, pipeline.py, review.py, llm.py, report.py
   alert/       base.py, notifiers.py, rules.py, manager.py
-  monitor/     store.py, feedback.py, api.py, static/dashboard.html
+  monitor/     store.py, feedback.py, api.py (FastAPI), workspace.py (uploads, analyses), jobs.py,
+               catalog.py (pipeline files), settings.py, doctor.py,
+               static/ (index.html, css/app.css, js/ modules: no build step)
   pipeline/    config.py, executor.py, scheduler.py, state.py, sinks.py, templates.py
   demo/        generator.py, benchmark.py
   api.py       read / profile / detect / fix
@@ -443,12 +509,29 @@ tests/         pytest suite (offline, ~10 s)
 
 ```bash
 uv sync --all-extras
-uv run pytest -q                 # 96 tests, all offline (HTTP and SMTP are mocked)
+uv run pytest -q                 # 106 tests, all offline (HTTP and SMTP are mocked)
 uv run ruff check . && uv run ruff format --check .
 uv run anomalyguard demo benchmark
 ```
 
-CI runs ruff, pytest and a CLI smoke test on Python 3.10, 3.11 and 3.12, and builds the Docker image ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+CI runs ruff, pytest and a CLI smoke test on Python 3.10, 3.11 and 3.12, checks that the wheel ships the web app, and builds the Docker image ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
+## Releasing
+
+1. Update the version in `pyproject.toml` and `src/anomalyguard/__init__.py`, and move the `Unreleased` notes in [`CHANGELOG.md`](CHANGELOG.md) under the new version.
+2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+The [release workflow](.github/workflows/release.yml) then checks that the tag matches the package version, runs lint and tests, builds the sdist and wheel, creates a GitHub Release with both attached (the CHANGELOG section becomes the notes), and pushes a multi-arch image to `ghcr.io/manas-thakur/anomalyguard` tagged `X.Y.Z`, `X.Y` and `latest`. Tags with a hyphen (`v0.3.0-rc1`) become pre-releases and do not move `latest`.
+
+### Publishing to PyPI
+
+The `pypi` job uses [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API token is stored. It is skipped until you opt in:
+
+1. On PyPI, add a trusted publisher for project `anomalyguard`: owner `Manas-thakur`, repository `anomalyguard`, workflow `release.yml`, environment `pypi`. (For a project that does not exist yet, use a "pending publisher".)
+2. In the GitHub repository, create the `pypi` environment (Settings > Environments), optionally with required reviewers.
+3. Add the repository variable `PYPI_PUBLISH` = `true` (Settings > Secrets and variables > Actions > Variables).
+
+The next tag publishes the same sdist and wheel that were attached to the GitHub Release. The container image is public once the package visibility on GHCR is set to public.
 
 ## Roadmap: not yet implemented from `plans/`
 
@@ -461,7 +544,8 @@ The design documents in [`plans/`](plans/) are broader than this release. These 
 - **Monitor**: PostgreSQL metrics storage, per-detector latency tracking, and false-negative feedback ("missed anomaly").
 - **Pipeline**: cron expressions (only intervals are supported), and processing per micro-batch for unbounded streams (each run reads the available batch).
 - **Demo**: real-world datasets, detection-delay and memory metrics, plots and notebooks.
-- **Project**: the TypeScript CLI and React dashboard were replaced by the Python CLI and the static dashboard. The Astro blog/docs site is not started.
+- **Project**: the TypeScript CLI and React dashboard were replaced by the Python CLI and the no-build web app. The Astro blog/docs site is not started.
+- **Web app**: single-user. There are no user accounts or roles (one shared API key), uploads are analysed in memory (so very large files need a machine with matching RAM), and scheduled runs still need `anomalyguard run --schedule`; the UI runs pipelines on demand only.
 
 ## License
 

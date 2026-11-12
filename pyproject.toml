@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anomalyguard"
-version = "0.1.0"
+version = "0.2.0"
 description = "Data anomaly detection and remediation: ingest, validate, detect, fix, alert and monitor - algorithms built from scratch."
 readme = "README.md"
 license = "MIT"
@@ -13,7 +13,7 @@ authors = [{ name = "Manas Thakur" }]
 requires-python = ">=3.10"
 keywords = ["anomaly-detection", "data-quality", "isolation-forest", "data-validation", "data-cleaning", "monitoring"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-server = ["fastapi>=0.110", "uvicorn>=0.27"]
+server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.9"]
 parquet = ["pyarrow>=14"]
 sql = ["sqlalchemy>=2.0"]
 all = ["anomalyguard[server,parquet,sql]"]
@@ -53,7 +53,7 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 packages = ["src/anomalyguard"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/anomalyguard", "tests", "examples", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src/anomalyguard", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

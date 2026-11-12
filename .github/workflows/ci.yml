@@ -39,9 +39,21 @@ jobs:
 
       - name: CLI smoke test
         run: |
+          uv run anomalyguard doctor
           uv run anomalyguard detect examples/data/orders.csv --group-by region --top 3
           uv run anomalyguard run examples/pipeline.yaml
           uv run anomalyguard demo benchmark --datasets sensor
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Wheel ships the web app
+        run: unzip -l dist/*.whl | grep -q "anomalyguard/monitor/static/index.html"
 
   docker:
     runs-on: ubuntu-latest

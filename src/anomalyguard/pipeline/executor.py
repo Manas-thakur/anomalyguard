@@ -156,7 +156,10 @@ class PipelineExecutor:
             detectors = (
                 {r.detector: r.n_anomalies for r in result.report.results} if result.report else {}
             )
-            self.store.finish_run(run_id, result.metrics, result.status, result.error, detectors)
+            stored = {**result.metrics, "outputs": result.outputs}
+            if cfg.source.get("path"):
+                stored["source"] = str(cfg.resolve(cfg.source["path"]))
+            self.store.finish_run(run_id, stored, result.status, result.error, detectors)
             if result.alerts:
                 self.store.add_alerts(run_id, [a.to_dict() for a in result.alerts])
         self.state.update(

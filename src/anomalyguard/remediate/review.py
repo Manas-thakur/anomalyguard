@@ -31,7 +31,21 @@ CREATE TABLE IF NOT EXISTS review_items (
 CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status);
 """
 
-STATUSES = ("pending", "approved", "rejected")
+# columns added after 0.1.0; created on open for older databases
+MIGRATIONS = {
+    "detector": "ALTER TABLE review_items ADD COLUMN detector TEXT",
+    "applied_at": "ALTER TABLE review_items ADD COLUMN applied_at TEXT",
+}
+
+STATUSES = ("pending", "approved", "rejected", "applied")
+SORTS = {
+    "id": "id",
+    "created_at": "created_at",
+    "column": "column_name",
+    "pipeline": "pipeline",
+    "status": "status",
+    "detector": "detector",
+}
 
 
 def _now() -> str:
@@ -64,9 +78,17 @@ class ReviewQueue:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._conn()) as conn, conn:
             conn.executescript(SCHEMA)
+            have = {r[1] for r in conn.execute("PRAGMA table_info(review_items)").fetchall()}
+            for col, ddl in MIGRATIONS.items():
+                if col not in have:
+                    conn.execute(ddl)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_review_filters"
+                " ON review_items(status, pipeline, column_name)"
+            )
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -80,11 +102,13 @@ class ReviewQueue:
         run_id: int | None = None,
         suggestion: Any = None,
         suggestion_confidence: float | None = None,
+        detector: str | None = None,
     ) -> int:
         with closing(self._conn()) as conn, conn:
             cur = conn.execute(
-                "INSERT INTO review_items (created_at, pipeline, run_id, row_index, column_name, value, reason, suggestion, suggestion_confidence)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO review_items (created_at, pipeline, run_id, row_index, column_name, value,"
+                " reason, suggestion, suggestion_confidence, detector)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _now(),
                     pipeline,
@@ -95,6 +119,7 @@ class ReviewQueue:
                     reason,
                     _dump(suggestion),
                     suggestion_confidence,
+                    detector,
                 ),
             )
             return int(cur.lastrowid)
@@ -132,6 +157,7 @@ class ReviewQueue:
                     run_id=run_id,
                     suggestion=d.get("suggestion"),
                     suggestion_confidence=d.get("suggestion_confidence"),
+                    detector=d.get("detector"),
                 )
             )
         return ids
@@ -164,6 +190,107 @@ class ReviewQueue:
         params.append(limit)
         with closing(self._conn()) as conn:
             return [self._row(r) for r in conn.execute(q, params).fetchall()]
+
+    @staticmethod
+    def _where(
+        status: str | None = None,
+        pipeline: str | None = None,
+        column: str | None = None,
+        detector: str | None = None,
+        run_id: int | None = None,
+        q: str | None = None,
+        ids: list[int] | None = None,
+    ) -> tuple[str, list[Any]]:
+        clauses, params = ["1=1"], []
+        for value, sql in (
+            (status, "status = ?"),
+            (pipeline, "pipeline = ?"),
+            (column, "column_name = ?"),
+            (detector, "detector = ?"),
+            (run_id, "run_id = ?"),
+        ):
+            if value not in (None, ""):
+                clauses.append(sql)
+                params.append(value)
+        if q:
+            clauses.append("(reason LIKE ? OR value LIKE ? OR row_index LIKE ?)")
+            params += [f"%{q}%"] * 3
+        if ids is not None:
+            marks = ",".join("?" * len(ids)) or "NULL"
+            clauses.append(f"id IN ({marks})")
+            params += [int(i) for i in ids]
+        return " AND ".join(clauses), params
+
+    def query(
+        self,
+        status: str | None = "pending",
+        pipeline: str | None = None,
+        column: str | None = None,
+        detector: str | None = None,
+        run_id: int | None = None,
+        q: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+        sort: str = "id",
+        descending: bool = True,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Filtered, paginated items plus the total number of matches."""
+        where, params = self._where(status, pipeline, column, detector, run_id, q)
+        order = SORTS.get(sort, "id")
+        direction = "DESC" if descending else "ASC"
+        with closing(self._conn()) as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM review_items WHERE {where}", params
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT * FROM review_items WHERE {where} ORDER BY {order} {direction}, id DESC"
+                " LIMIT ? OFFSET ?",
+                [*params, int(limit), int(offset)],
+            ).fetchall()
+        return [self._row(r) for r in rows], int(total)
+
+    def ids(self, **filters: Any) -> list[int]:
+        """Ids of every item matching the filters (see :meth:`query`)."""
+        where, params = self._where(**filters)
+        with closing(self._conn()) as conn:
+            return [
+                int(r[0])
+                for r in conn.execute(
+                    f"SELECT id FROM review_items WHERE {where} ORDER BY id", params
+                ).fetchall()
+            ]
+
+    def facets(self, status: str | None = None) -> dict[str, Any]:
+        """Distinct pipelines, columns and detectors (for filter menus) plus status counts."""
+        where, params = self._where(status=status)
+        out: dict[str, Any] = {"counts": self.counts()}
+        with closing(self._conn()) as conn:
+            for key, col in (
+                ("pipelines", "pipeline"),
+                ("columns", "column_name"),
+                ("detectors", "detector"),
+            ):
+                out[key] = [
+                    {"value": r[0], "count": r[1]}
+                    for r in conn.execute(
+                        f"SELECT {col}, COUNT(*) FROM review_items WHERE {where}"
+                        f" AND {col} IS NOT NULL GROUP BY {col} ORDER BY COUNT(*) DESC, {col}",
+                        params,
+                    ).fetchall()
+                ]
+        return out
+
+    def mark_applied(self, item_ids: list[int]) -> int:
+        if not item_ids:
+            return 0
+        marks = ",".join("?" * len(item_ids))
+        with closing(self._conn()) as conn, conn:
+            cur = conn.execute(
+                "UPDATE review_items SET status = 'applied', applied_at = ?"
+                f" WHERE status = 'approved' AND id IN ({marks})",
+                [_now(), *[int(i) for i in item_ids]],
+            )
+            return int(cur.rowcount)
 
     def counts(self) -> dict[str, int]:
         with closing(self._conn()) as conn:
@@ -199,13 +326,34 @@ class ReviewQueue:
             raise KeyError(f"Review item {item_id} not found")
         return self._resolve(item_id, "rejected", item["value"], note)
 
-    def apply(self, df: pd.DataFrame, pipeline: str | None = None) -> tuple[pd.DataFrame, int]:
-        """Write approved values into ``df`` (matched on index label + column)."""
+    def apply(
+        self,
+        df: pd.DataFrame,
+        pipeline: str | None = None,
+        item_ids: list[int] | None = None,
+        mark: bool = False,
+    ) -> tuple[pd.DataFrame, int]:
+        """Write approved values into ``df`` (matched on index label + column).
+
+        ``item_ids`` limits this to those items; with ``mark=True`` the items
+        that were written move to the ``applied`` status.
+        """
         out = df.copy()
-        applied = 0
+        done: list[int] = []
+        wanted = None if item_ids is None else {int(i) for i in item_ids}
         for item in self.list(status="approved", limit=1_000_000, pipeline=pipeline):
+            if wanted is not None and item["id"] not in wanted:
+                continue
             col, idx = item["column"], item["row_index"]
             if col in out.columns and idx in out.index:
-                out.loc[idx, col] = item["resolved_value"]
-                applied += 1
-        return out, applied
+                value = item["resolved_value"]
+                kind = out[col].dtype.kind
+                if kind in "iu" and isinstance(value, float):
+                    out[col] = out[col].astype(float)
+                elif kind in "iuf" and isinstance(value, str):
+                    out[col] = out[col].astype(object)
+                out.loc[idx, col] = value
+                done.append(item["id"])
+        if mark:
+            self.mark_applied(done)
+        return out, len(done)

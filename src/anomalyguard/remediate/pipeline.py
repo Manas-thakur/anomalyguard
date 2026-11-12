@@ -115,6 +115,7 @@ class FlaggedItem:
     suggestion: Any = None
     suggestion_confidence: float | None = None
     suggestion_rationale: str | None = None
+    detector: str | None = None  # detector name, or the problem kind (missing, type, schema)
 
     def to_dict(self) -> dict[str, Any]:
         v = self.value
@@ -132,6 +133,7 @@ class FlaggedItem:
             "suggestion": self.suggestion,
             "suggestion_confidence": self.suggestion_confidence,
             "suggestion_rationale": self.suggestion_rationale,
+            "detector": self.detector,
         }
 
 
@@ -194,9 +196,9 @@ class RemediationPipeline:
         dropped: dict[int, str] = {}
         flagged: list[FlaggedItem] = []
 
-        def flag(row: int, column: str | None, reason: str) -> None:
+        def flag(row: int, column: str | None, reason: str, detector: str | None = None) -> None:
             value = work.iloc[row][column] if column else None
-            flagged.append(FlaggedItem(row, index[row], column, value, reason))
+            flagged.append(FlaggedItem(row, index[row], column, value, reason, detector=detector))
 
         # 1. duplicates
         if self.policy.dedupe:
@@ -225,7 +227,7 @@ class RemediationPipeline:
                         if pol.invalid == "drop":
                             dropped.setdefault(ch.row, f"type error in {col}: {ch.reason}")
                         else:
-                            flag(ch.row, col, f"type error: {ch.reason}")
+                            flag(ch.row, col, f"type error: {ch.reason}", "type")
                 else:
                     changes.extend(fixes)
 
@@ -234,20 +236,24 @@ class RemediationPipeline:
             cols = [c for c in work.columns if c in set(report.counts_by_column())]
             mask_df = report.column_mask(cols)
             reasons: dict[tuple[int, str], str] = {}
+            sources: dict[tuple[int, str], str] = {}
             for f in report.findings:
                 if f.column:
                     reasons.setdefault((f.row, f.column), f.reason)
+                    sources.setdefault((f.row, f.column), f.detector)
             for col in cols:
                 mask = mask_df[col].to_numpy() & work[col].notna().to_numpy()
                 if not mask.any():
                     continue
-                changes.extend(self._fix_outliers(work, col, mask, reasons, flag, dropped))
+                changes.extend(self._fix_outliers(work, col, mask, reasons, flag, dropped, sources))
             for r in report.rows_without_column():
-                reason = "; ".join(f.reason for f in report.findings if f.row == r)
+                row_findings = [f for f in report.findings if f.row == r]
+                reason = "; ".join(f.reason for f in row_findings)
                 if self.policy.unattributed == "drop":
                     dropped.setdefault(r, f"anomalous row: {reason}")
                 elif self.policy.unattributed == "flag":
-                    flag(r, None, f"anomalous row: {reason}")
+                    dets = ",".join(sorted({f.detector for f in row_findings})) or None
+                    flag(r, None, f"anomalous row: {reason}", dets)
 
         # 4. schema constraints (ranges, allowed values)
         if self.schema is not None:
@@ -282,16 +288,17 @@ class RemediationPipeline:
         return RemediationResult(out, original, changes, dropped, flagged)
 
     # ------------------------------------------------------------------
-    def _fix_outliers(self, work, col, mask, reasons, flag, dropped) -> list[Change]:
+    def _fix_outliers(self, work, col, mask, reasons, flag, dropped, sources=None) -> list[Change]:
         pol = self.policy.for_column(col)
         action = pol.outlier
         rows = np.flatnonzero(mask)
         why = {r: reasons.get((r, col), "outlier") for r in rows.tolist()}
+        src = {r: (sources or {}).get((r, col)) for r in rows.tolist()}
         if action == "keep":
             return []
         if action == "flag":
             for r in rows.tolist():
-                flag(r, col, why[r])
+                flag(r, col, why[r], src[r])
             return []
         if action == "drop":
             for r in rows.tolist():
@@ -299,7 +306,7 @@ class RemediationPipeline:
             return []
         if not pd.api.types.is_numeric_dtype(work[col]):
             for r in rows.tolist():
-                flag(r, col, why[r])
+                flag(r, col, why[r], src[r])
             return []
         strategy: Strategy
         if action == "cap":
@@ -321,7 +328,7 @@ class RemediationPipeline:
         # values a robust cap cannot move (e.g. contextual anomalies) go to review
         for r in rows.tolist():
             if r not in changed:
-                flag(r, col, f"{why[r]} (not auto-fixable by {strategy.name})")
+                flag(r, col, f"{why[r]} (not auto-fixable by {strategy.name})", src[r])
         return changes
 
     def _fix_constraints(self, work, flag) -> list[Change]:
@@ -339,7 +346,12 @@ class RemediationPipeline:
                 if mask.any():
                     if pol.outlier in ("flag", "keep"):
                         for r in np.flatnonzero(mask).tolist():
-                            flag(r, col, f"{work[col].iloc[r]} outside [{fld.min}, {fld.max}]")
+                            flag(
+                                r,
+                                col,
+                                f"{work[col].iloc[r]} outside [{fld.min}, {fld.max}]",
+                                "schema",
+                            )
                     else:
                         changes.extend(
                             Clip(fld.min, fld.max).apply(work, col, mask, "schema range")
@@ -348,7 +360,7 @@ class RemediationPipeline:
                 changes.extend(normalise_categories(work, col, fld.allowed))
                 bad = work[col].notna() & ~work[col].isin(fld.allowed)
                 for r in np.flatnonzero(bad.to_numpy()).tolist():
-                    flag(r, col, f"{work[col].iloc[r]!r} not an allowed value")
+                    flag(r, col, f"{work[col].iloc[r]!r} not an allowed value", "schema")
         return changes
 
     def _fix_missing(self, work, col, mask, dtype, flag, dropped) -> list[Change]:
@@ -366,7 +378,7 @@ class RemediationPipeline:
         rows = np.flatnonzero(mask)
         if action == "flag":
             for r in rows.tolist():
-                flag(r, col, "missing value")
+                flag(r, col, "missing value", "missing")
             return []
         if action == "drop":
             for r in rows.tolist():

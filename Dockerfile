@@ -4,6 +4,8 @@
 #   docker run --rm -v "$PWD:/data" anomalyguard detect examples/data/orders.csv
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="AnomalyGuard"       org.opencontainers.image.description="Data anomaly detection and remediation with a web app and REST API"       org.opencontainers.image.source="https://github.com/Manas-thakur/anomalyguard"       org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
