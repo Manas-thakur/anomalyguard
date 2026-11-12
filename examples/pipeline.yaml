@@ -1,0 +1,78 @@
+# Example AnomalyGuard pipeline for the synthetic orders dataset.
+#
+#   anomalyguard run examples/pipeline.yaml
+#   anomalyguard serve            # then open http://127.0.0.1:8765
+#
+# Data paths are relative to this file. Run history, the review queue and
+# pipeline state go to .anomalyguard/ in the current directory.
+name: orders_quality
+description: Orders feed - validate, detect anomalies, fix what is safe, flag the rest
+
+source:
+  type: csv
+  path: data/orders.csv
+
+schema:
+  path: orders.schema.yaml
+
+detectors:
+  - method: mad                 # global robust z-score per column
+    columns: [quantity, unit_price, delivery_days]
+  - method: mad                 # same, but within each region (contextual anomalies)
+    columns: [unit_price]
+    group_by: region
+  - method: iforest             # multivariate outliers
+    columns: [quantity, unit_price, delivery_days]
+
+detection:
+  combine: any
+
+remediation:
+  dedupe: true                  # uses the schema primary key (order_id)
+  default:
+    missing: auto               # median for numbers, mode for categories, flag ids/text
+    outlier: cap
+    invalid: coerce
+  columns:
+    unit_price:
+      outlier: flag             # never rewrite prices automatically - send to review
+  # llm:                        # optional LLM suggestions for flagged values
+  #   enabled: true
+  #   provider: ollama          # or "openai" for any OpenAI-compatible endpoint
+  #   model: llama3.1:8b
+  #   auto_apply: false
+
+alerts:
+  rules:
+    - metric: anomaly_rate
+      op: ">"
+      value: 0.03
+      severity: warning
+    - metric: quality_score
+      op: "<"
+      value: 0.95
+      severity: error
+    - metric: anomaly_rate
+      type: change              # compare with the previous successful run
+      op: ">"
+      value: 0.02
+      severity: warning
+  notifiers:
+    - type: console
+      min_severity: info
+    - type: file
+      path: ../out/alerts.jsonl
+    # - type: slack
+    #   url: ${SLACK_WEBHOOK_URL}
+    #   min_severity: error
+  rate_limit:
+    dedup_seconds: 3600
+    max_per_window: 20
+
+sink:
+  path: ../out/orders_clean.csv
+  anomalies_path: ../out/orders_anomalies.json
+  report_path: ../out/orders_remediation.md
+
+schedule:
+  every: 1h                     # anomalyguard run examples/pipeline.yaml --schedule

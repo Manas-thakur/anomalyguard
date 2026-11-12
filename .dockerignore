@@ -1,0 +1,8 @@
+.git
+.venv
+.anomalyguard
+out
+**/__pycache__
+.pytest_cache
+.ruff_cache
+plans

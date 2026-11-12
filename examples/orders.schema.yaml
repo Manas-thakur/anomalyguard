@@ -1,0 +1,42 @@
+# Schema for examples/data/orders.csv.
+# Started from `anomalyguard profile examples/data/orders.csv --schema-out ...`
+# and then tightened by hand (required columns, ranges, patterns).
+name: orders
+version: 1
+primary_key: [order_id]
+timestamp_column: timestamp
+max_age_hours: 87600        # freshness: data older than ~10 years counts as stale
+fields:
+  order_id:
+    type: integer
+    nullable: false
+    unique: true
+  timestamp:
+    type: datetime
+    nullable: false
+  customer_id:
+    type: string
+    nullable: false
+    pattern: 'C\d{4}'
+  region:
+    type: categorical
+    nullable: false
+    allowed: [north, south, east, west]
+  quantity:
+    type: integer
+    nullable: false
+    min: 1
+    max: 100
+  unit_price:
+    type: float
+    nullable: false
+    min: 0
+  delivery_days:
+    type: integer
+    nullable: false
+    min: 0
+    max: 30
+  status:
+    type: categorical
+    nullable: false
+    allowed: [completed, pending, cancelled, returned]

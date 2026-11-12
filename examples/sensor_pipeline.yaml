@@ -1,0 +1,37 @@
+# Time-series example: hourly temperature with daily seasonality.
+#   anomalyguard run examples/sensor_pipeline.yaml
+name: sensor_monitor
+description: Seasonal + change-point monitoring of an hourly sensor
+
+source:
+  type: csv
+  path: data/sensor.csv
+
+detectors:
+  - method: seasonal            # values that do not fit the daily cycle
+    columns: [temperature]
+    period: 24
+  - method: cusum               # sustained shifts and drift
+    columns: [temperature]
+    period: 24
+
+detection:
+  time_column: timestamp
+
+remediation:
+  dedupe: false
+  default:
+    missing: interpolate
+    outlier: flag               # keep raw readings; send anomalies to review
+
+alerts:
+  rules:
+    - metric: anomaly_rate
+      op: ">"
+      value: 0.02
+      severity: warning
+  notifiers:
+    - type: console
+
+sink:
+  anomalies_path: ../out/sensor_anomalies.json
