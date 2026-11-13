@@ -1,0 +1,4 @@
+# The web app build in src/anomalyguard/monitor/static must be byte-identical on every OS
+# (CI rebuilds it and diffs), so its sources and output always use LF line endings.
+web/** text=auto eol=lf
+src/anomalyguard/monitor/static/** text=auto eol=lf

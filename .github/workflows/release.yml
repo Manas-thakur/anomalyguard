@@ -1,9 +1,9 @@
 name: Release
 
-# Runs when a version tag is pushed:  git tag v0.2.0 && git push origin v0.2.0
+# Runs when a version tag is pushed:  git tag v0.3.0 && git push origin v0.3.0
 #
 # 1. test   - lint + tests (same as CI) and a check that the tag matches the package version
-# 2. build  - sdist + wheel, uploaded as a workflow artifact
+# 2. build  - web app (pnpm build into the package), then sdist + wheel, uploaded as a workflow artifact
 # 3. github - GitHub Release with the sdist/wheel attached and the CHANGELOG section as notes
 # 4. docker - multi-arch image pushed to ghcr.io/manas-thakur/anomalyguard (GITHUB_TOKEN)
 # 5. pypi   - PyPI trusted publishing; skipped unless the repository variable
@@ -55,6 +55,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build the web app into the package
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
@@ -67,7 +83,7 @@ jobs:
           uv pip install --python /tmp/wheel-env "$(ls dist/*.whl)[server]"
           /tmp/wheel-env/bin/anomalyguard --version
           /tmp/wheel-env/bin/anomalyguard doctor
-          /tmp/wheel-env/bin/python -c "import anomalyguard.monitor.api as a, pathlib; assert (a.STATIC_DIR / 'index.html').exists()"
+          /tmp/wheel-env/bin/python -c "import anomalyguard.monitor.api as a; assert (a.STATIC_DIR / 'index.html').exists(); assert any((a.STATIC_DIR / 'assets').glob('*.js'))"
 
       - uses: actions/upload-artifact@v4
         with:

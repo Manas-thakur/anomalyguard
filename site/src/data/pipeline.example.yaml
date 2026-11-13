@@ -1,0 +1,45 @@
+# pipeline.yaml: paths are relative to this file
+name: orders_quality
+description: Validate orders, fix what is safe, flag the rest
+
+source:
+  type: csv
+  path: orders.csv
+
+schema:
+  path: orders.schema.yaml   # inferred on the first run
+
+detectors:
+  - method: mad              # robust z-score per column
+    columns: [quantity, unit_price, delivery_days]
+  - method: mad              # same, within each region
+    columns: [unit_price]
+    group_by: region
+  - method: iforest          # multivariate outliers
+    columns: [quantity, unit_price, delivery_days]
+
+remediation:
+  dedupe: true
+  default:
+    missing: auto            # median / mode
+    outlier: cap             # clip to robust fences
+    invalid: coerce
+  columns:
+    unit_price:
+      outlier: flag          # prices go to review
+
+alerts:
+  rules:
+    - {metric: anomaly_rate, op: ">", value: 0.03}
+    - {metric: quality_score, op: "<", value: 0.95,
+       severity: error}
+  notifiers:
+    - {type: console}
+    # - {type: slack, url: "${SLACK_WEBHOOK_URL}"}
+
+sink:
+  path: out/orders_clean.csv
+  report_path: out/orders_remediation.md
+
+schedule:
+  every: 1h                  # used by run --schedule

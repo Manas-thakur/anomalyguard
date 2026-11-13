@@ -6,3 +6,7 @@ out
 .pytest_cache
 .ruff_cache
 plans
+**/node_modules
+site
+web
+docs/screenshots

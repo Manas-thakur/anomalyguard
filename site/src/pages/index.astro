@@ -1,0 +1,590 @@
+---
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
+import '@fontsource-variable/space-grotesk';
+import '../styles/landing.css';
+import { highlightShell, highlightYaml } from '../lib/highlight';
+import pipelineYaml from '../data/pipeline.example.yaml?raw';
+import { best } from '../data/benchmarks';
+import { categoryLabel, detectors } from '../data/detectors';
+import { href, shot } from '../lib/shots';
+
+const VERSION = '0.3.0';
+const REPO = 'https://github.com/Manas-thakur/anomalyguard';
+const RELEASES = `${REPO}/releases`;
+const docs = (p: string) => href(`docs/${p}/`);
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+
+const install = `pip install "anomalyguard[server] @ git+${REPO}"`;
+
+const quickstart = `# install the CLI, library and web app
+${install}
+
+# 1,000 synthetic orders with labelled anomalies
+anomalyguard demo generate -d orders -o orders.csv
+
+# inferred schema, column stats and a quality score
+anomalyguard profile orders.csv
+
+# robust z-score + Isolation Forest, within each region
+anomalyguard detect orders.csv --group-by region
+
+# dedupe, fix types, impute, cap; flag the rest
+anomalyguard fix orders.csv -o orders_clean.csv --group-by region --report fix.md
+
+# write a starter pipeline and run it
+anomalyguard init --source orders.csv --name orders
+anomalyguard run pipeline.yaml
+
+# web app + REST API on http://127.0.0.1:8765
+anomalyguard serve`;
+
+const heroShot = shot('health.png', [1700, 1225]);
+const screens = [
+	{
+		info: shot('incidents.png', [1700, 1475]),
+		alt: "A pipeline run's incidents: values higher than expected, with the expected range shaded and the flagged values marked",
+		title: 'Incidents, not walls of findings.',
+		text: 'Findings are grouped by source, column and kind, with the expected range next to the actual value and a chart with the band shaded.',
+	},
+	{
+		info: shot('review-inbox.png', [1700, 1125]),
+		alt: 'Review inbox: a list of flagged values with a selection and the bulk bar, and the open item on the right',
+		title: 'A keyboard-first review inbox.',
+		text: 'j / k to move, a to approve, r to reject, m to mark as normal. Bulk actions apply to a selection or to every matching item.',
+	},
+	{
+		info: shot('command-palette.png', [1700, 1125]),
+		alt: 'Command palette listing pages, sample analyses, runs and pipelines',
+		title: 'Ctrl/Cmd+K for everything.',
+		text: 'Jump to a page, open a run by number, run a pipeline or analyze a sample dataset from the command palette.',
+	},
+];
+
+const steps = [
+	{ name: 'Ingest', mod: 'ingest', text: 'CSV, TSV, JSON, JSONL, Parquet, SQLite or any SQLAlchemy URL, and paginated REST APIs. A cursor column makes reads incremental.' },
+	{ name: 'Validate', mod: 'schema', text: 'Infer or load a schema, coerce types, and score completeness, validity, uniqueness and freshness.' },
+	{ name: 'Detect', mod: 'detect', text: 'Statistical, ML, time-series, grouped and ensemble detectors. Every flag names the column and the reason.' },
+	{ name: 'Remediate', mod: 'remediate', text: 'Per-column policies: dedupe, fix types, impute, cap. What a policy cannot fix safely goes to the review queue.' },
+	{ name: 'Alert', mod: 'alert', text: 'Threshold and change rules on run metrics, sent to the console, a file, a webhook, Slack or email, with rate limits.' },
+	{ name: 'Monitor', mod: 'monitor', text: 'Every run is stored in SQLite. Triage feedback adjusts detector thresholds for the next run.' },
+];
+
+const faqs: { q: string; a: string[] }[] = [
+	{
+		q: 'Does my data leave my machine?',
+		a: [
+			'No. AnomalyGuard runs locally and keeps its state (run history, review queue, uploads) in SQLite under <code>.anomalyguard/</code> in the working directory.',
+			'It only talks to the network when you configure it to: REST sources, webhook, Slack or email notifiers, and the optional LLM suggestions (a local Ollama model or an OpenAI-compatible endpoint).',
+		],
+	},
+	{
+		q: 'What does it depend on?',
+		a: [
+			'NumPy, pandas, SciPy, PyYAML and httpx. The detectors are implemented in NumPy; SciPy supplies only the t-distribution and the KD-tree neighbour search. scikit-learn is not used.',
+			'The web app is built with React and ships prebuilt inside the Python package, so no Node.js is needed to run it. The <code>server</code> extra adds FastAPI and uvicorn.',
+		],
+	},
+	{
+		q: 'Will it change my data without asking?',
+		a: [
+			'Only according to the remediation policy you set per column, and every changed cell is listed in the remediation report with its before and after values.',
+			'Values a policy cannot fix safely, such as contextual outliers, are flagged for human review instead. Set <code>remediation: false</code> in a pipeline to only report.',
+		],
+	},
+	{
+		q: 'Is it for teams?',
+		a: [
+			'It is a single-user tool. There are no user accounts or roles: the web app and API can be protected with one shared API key. Put it behind a reverse proxy with TLS if you expose it.',
+		],
+	},
+	{
+		q: 'How big a file can it handle?',
+		a: [
+			'Uploads in the web app are analysed in memory, so very large files need a machine with matching RAM. The upload limit defaults to 100 MB and is configurable. Pipelines can read incrementally from a cursor column or cap rows with <code>max_rows</code>.',
+		],
+	},
+	{
+		q: 'Can it run on a schedule?',
+		a: [
+			'<code>anomalyguard run pipeline.yaml --schedule</code> repeats a pipeline on the interval in its YAML, and <code>--every 5m</code> overrides it. Intervals only, no cron expressions. The web app runs pipelines on demand.',
+		],
+	},
+	{
+		q: 'How do I install it?',
+		a: [
+			`With pip from GitHub (shown above), from the <a href="${RELEASES}">GitHub Releases</a>, or as the container image <code>ghcr.io/manas-thakur/anomalyguard</code>. Python 3.10 or newer.`,
+		],
+	},
+];
+
+const githubIcon =
+	'<svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.7 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>';
+const copyIcon =
+	'<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+
+const title = 'AnomalyGuard: data anomaly detection and remediation for Python';
+const description =
+	'Validate, detect, fix, alert and monitor data quality locally. Thirteen detectors written from scratch in NumPy, a pipeline YAML, a CLI and a web app. MIT licensed.';
+const canonical = new URL(import.meta.env.BASE_URL, Astro.site).href;
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+		<link rel="canonical" href={canonical} />
+		<link rel="icon" href={`${base}/favicon.svg`} type="image/svg+xml" />
+		<meta property="og:type" content="website" />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:url" content={canonical} />
+		{heroShot.exists && <meta property="og:image" content={new URL(heroShot.src, Astro.site).href} />}
+		<meta name="theme-color" content="#f7f9fc" media="(prefers-color-scheme: light)" />
+		<meta name="theme-color" content="#11141b" media="(prefers-color-scheme: dark)" />
+		<script is:inline>
+			// Share the theme choice with the docs (Starlight stores it under this key).
+			(function () {
+				var d = document.documentElement;
+				d.classList.add('js');
+				try {
+					var t = localStorage.getItem('starlight-theme');
+					if (t === 'light' || t === 'dark') d.dataset.theme = t;
+				} catch (e) {}
+			})();
+		</script>
+	</head>
+	<body>
+		<a class="skip" href="#main">Skip to content</a>
+
+		<header class="nav">
+			<div class="wrap nav__inner">
+				<a class="brand" href={`${base}/`} aria-label="AnomalyGuard home">
+					<img src={`${base}/favicon.svg`} alt="" width="26" height="26" />
+					AnomalyGuard
+				</a>
+				<nav aria-label="Primary">
+					<ul class="nav__links">
+						<li><a href={docs('introduction')}>Docs</a></li>
+						<li><a href={docs('reference/cli')}>CLI</a></li>
+						<li><a href={docs('benchmarks')}>Benchmarks</a></li>
+						<li><a href={docs('changelog')}>Changelog</a></li>
+					</ul>
+				</nav>
+				<div class="nav__actions">
+					<a class="nav__version" href={RELEASES} title="Releases on GitHub">v{VERSION}</a>
+					<button class="icon-btn theme-toggle" type="button" aria-label="Switch between light and dark theme">
+						<svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"></path></svg>
+						<svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+					</button>
+					<a class="icon-btn" href={REPO} aria-label="AnomalyGuard on GitHub"><Fragment set:html={githubIcon} /></a>
+					<a class="btn btn--primary" href={docs('quickstart')}>Get started<span class="long visually-hidden"> with the quickstart</span></a>
+				</div>
+			</div>
+		</header>
+
+		<main id="main">
+			<!-- hero -->
+			<section class="hero" aria-labelledby="hero-title">
+				<div class="wrap hero__grid">
+					<div class="hero__copy">
+						<h1 id="hero-title">Find bad data. Fix what's safe. <span class="hl">Flag the rest.</span></h1>
+						<p class="hero__lede">
+							AnomalyGuard validates tables against a schema, finds anomalies with statistical, ML,
+							time-series and contextual detectors, repairs what a policy allows and sends everything
+							else to a review queue. Every flag says why. It runs on your machine, from Python, the
+							CLI or a local web app.
+						</p>
+						<div class="hero__ctas">
+							<a class="btn btn--primary" href={docs('quickstart')}>Read the quickstart</a>
+							<a class="btn btn--ghost" href={REPO}><Fragment set:html={githubIcon} />View on GitHub</a>
+						</div>
+						<div class="install">
+							<code id="install-cmd">{install}</code>
+							<button class="copy" type="button" data-copy="#install-cmd" aria-label="Copy the install command"><Fragment set:html={copyIcon} /><span>Copy</span></button>
+						</div>
+						<ul class="facts label" aria-label="Project facts">
+							<li>MIT license</li>
+							<li>Python 3.10+</li>
+							<li>Local-first, SQLite state</li>
+						</ul>
+					</div>
+
+					<figure class="code-card term" aria-label="Example output of anomalyguard detect">
+						<div class="code-card__head"><span>terminal · real output, wrapped and trimmed</span></div>
+<pre><code><span class="p">$ </span><span class="c">anomalyguard detect orders.csv --group-by region --top 2</span>
+<span class="o">Scanned 1000 rows: </span><span class="a">49 anomalous (4.9%)</span><span class="o">, combine=any</span>
+<span class="m">By detector: grouped(mad by region)=41, grouped(iforest by region)=49</span>
+<span class="m">By column:   (row)=3, delivery_days=13, quantity=10, unit_price=23</span>
+
+<span class="o">Top 2 anomalies (highest score first):</span>
+<span class="o">  row </span><span class="k">794</span><span class="o">  score=94.47  votes=2  columns=</span><span class="k">unit_price</span>
+<span class="m">      - </span><span class="o">[region=east] unit_price=</span><span class="a">3035</span><span class="o"> has modified z-score 330.7</span>
+<span class="o">        vs median 89.08 (threshold 3.5)</span>
+<span class="m">      - </span><span class="o">[region=east] isolation score 0.787 &gt; 0.500</span>
+<span class="o">  row </span><span class="k">10</span><span class="o">  score=94.24  votes=2  columns=</span><span class="k">quantity</span>
+<span class="m">      - </span><span class="o">[region=south] quantity=</span><span class="a">493</span><span class="o"> has modified z-score 329.8</span>
+<span class="o">        vs median 4 (threshold 3.5)</span>
+
+<span class="p">$ </span><span class="c">anomalyguard fix orders.csv -o clean.csv --group-by region</span>
+<span class="o">Wrote 990 rows to clean.csv</span>
+<span class="g">  45 cells fixed</span><span class="o">, 10 rows dropped, </span><span class="a">16 rows flagged for review</span></code></pre>
+					</figure>
+				</div>
+			</section>
+
+			<!-- product -->
+			<section class="showcase" aria-label="The web app">
+				<div class="wrap">
+					<figure class="frame reveal">
+						{
+							heroShot.exists ? (
+								<img src={heroShot.src} width={heroShot.width} height={heroShot.height} alt="Health page: open incidents, sources monitored, average quality, and one row per source with a quality sparkline and trend" fetchpriority="high" />
+							) : (
+								<div class="frame__missing">Screenshot of the Health page</div>
+							)
+						}
+						<figcaption><strong>Health.</strong> Every pipeline and analysed file with its status, quality trend and open incidents. Screenshots are of the local web app started with <code>anomalyguard serve</code>.</figcaption>
+					</figure>
+				</div>
+			</section>
+
+			<!-- how it works -->
+			<section class="section" id="how-it-works" aria-labelledby="how-title">
+				<div class="wrap">
+					<div class="section__head reveal">
+						<h2 id="how-title">One pipeline, six stages.</h2>
+						<p>
+							Each stage is a Python module you can use on its own, or wire together in a
+							<a href={docs('reference/pipeline-yaml')}>pipeline YAML</a> that runs from the CLI, on an
+							interval, or from the web app.
+						</p>
+					</div>
+					<ol class="flow reveal">
+						{
+							steps.map((s) => (
+								<li>
+									<h3>{s.name}</h3>
+									<p>{s.text}</p>
+									<code class="mod">anomalyguard.{s.mod}</code>
+								</li>
+							))
+						}
+					</ol>
+				</div>
+			</section>
+
+			<!-- web app -->
+			<section class="section section--tint" id="web-app" aria-labelledby="app-title">
+				<div class="wrap">
+					<div class="section__head reveal">
+						<h2 id="app-title">A web app for triage, not just charts.</h2>
+						<p>
+							<code>anomalyguard serve</code> starts the web app and REST API on
+							<code>127.0.0.1:8765</code>. It is built with React and ships prebuilt in the Python
+							package. Light and dark themes, works at phone width, and every page can be driven from the
+							keyboard. <a href={docs('guides/web-app')}>Web app guide</a>
+						</p>
+					</div>
+					<div class="screens">
+						{
+							screens.map((s, i) =>
+								i === 0 ? (
+									<figure class="frame reveal">
+										{s.info.exists ? <img src={s.info.src} width={s.info.width} height={s.info.height} alt={s.alt} loading="lazy" decoding="async" /> : <div class="frame__missing">{s.alt}</div>}
+										<figcaption><strong>{s.title}</strong> {s.text}</figcaption>
+									</figure>
+								) : null,
+							)
+						}
+						<div class="screens__side">
+							{
+								screens.slice(1).map((s) => (
+									<figure class="frame reveal">
+										{s.info.exists ? <img src={s.info.src} width={s.info.width} height={s.info.height} alt={s.alt} loading="lazy" decoding="async" /> : <div class="frame__missing">{s.alt}</div>}
+										<figcaption><strong>{s.title}</strong> {s.text}</figcaption>
+									</figure>
+								))
+							}
+						</div>
+					</div>
+					<ul class="points reveal">
+						<li>
+							<h3>Analyze a file</h3>
+							<p>Upload CSV, TSV, JSON, JSONL or Parquet, read the profile, pick detectors, a group-by column and a sensitivity, and browse every flagged cell with its reason.</p>
+						</li>
+						<li>
+							<h3>Preview fixes, then export</h3>
+							<p>Choose a strategy per column, see the before/after diff of every changed cell, and download the cleaned CSV with a Markdown or JSON report.</p>
+						</li>
+						<li>
+							<h3>Triage in place</h3>
+							<p>Mark as normal records false-positive feedback, Confirm queues the cells for review, Mute 24h silences that kind of incident on that column.</p>
+						</li>
+						<li>
+							<h3>Run pipelines</h3>
+							<p>List, edit and validate pipeline YAML, create one from a template, and run it now as a background job.</p>
+						</li>
+					</ul>
+				</div>
+			</section>
+
+			<!-- benchmarks -->
+			<section class="section band" id="benchmarks" aria-labelledby="bench-title">
+				<div class="wrap">
+					<div class="section__head reveal">
+						<h2 id="bench-title">Measured on labelled data.</h2>
+						<p>
+							Best detector per dataset from <code>anomalyguard demo benchmark</code> (seed 42, default
+							thresholds), next to a global robust z-score on the same data. Reproduce it with one command.
+						</p>
+					</div>
+					<ul class="bench">
+						{
+							best.map((b) => (
+								<li class="reveal">
+									<div class="bench__id">
+										<h3>{b.dataset}</h3>
+										<p>{b.shape}</p>
+									</div>
+									<div>
+										<div class="bench__score">
+											<div class="bench__f1">
+												{b.f1}
+												<small>F1</small>
+											</div>
+											<div>
+												<div class="bench__det">{b.detector}</div>
+												<dl>
+													<dt>Precision</dt>
+													<dd>{b.precision}</dd>
+													<dt>Recall</dt>
+													<dd>{b.recall}</dd>
+													<dt>ROC-AUC</dt>
+													<dd>{b.auc}</dd>
+												</dl>
+											</div>
+										</div>
+									</div>
+									<div>
+										<p class="bench__note">{b.note}</p>
+										<p class="bench__base">
+											{b.baseline.detector}: F1 {b.baseline.f1}, ROC-AUC {b.baseline.auc}
+										</p>
+									</div>
+								</li>
+							))
+						}
+					</ul>
+					<div class="bench__foot">
+						<p>
+							The datasets are synthetic and built to exercise each anomaly type, so these numbers say
+							which detector suits which kind of anomaly. They do not predict results on your data.
+						</p>
+						<a class="more" href={docs('benchmarks')}>Full benchmark tables</a>
+					</div>
+				</div>
+			</section>
+
+			<!-- detectors -->
+			<section class="section" id="detectors" aria-labelledby="det-title">
+				<div class="wrap">
+					<div class="section__head reveal">
+						<h2 id="det-title">Thirteen detectors, written from scratch.</h2>
+						<p>
+							Isolation Forest, LOF, k-NN, Grubbs, CUSUM, EWMA and seasonal decomposition are implemented
+							in plain NumPy. Every raw score is divided by its threshold, so a normalised score above 1.0
+							means anomalous whichever detector produced it.
+						</p>
+					</div>
+					<div class="reveal">
+						<table class="catalogue">
+							<caption class="visually-hidden">Detectors, as listed by anomalyguard detectors</caption>
+							<thead>
+								<tr>
+									<th scope="col">Detector</th>
+									<th scope="col" class="cat-col">Category</th>
+									<th scope="col">What it does</th>
+									<th scope="col">Default threshold</th>
+								</tr>
+							</thead>
+							<tbody>
+								{
+									detectors.map((d) => (
+										<tr>
+											<th scope="row">
+												<code>{d.name}</code>
+												<span class="cat-inline">{categoryLabel[d.category]}</span>
+											</th>
+											<td class="cat cat-col">{categoryLabel[d.category]}</td>
+											<td class="desc">{d.description}</td>
+											<td class="thr">{d.threshold}</td>
+										</tr>
+									))
+								}
+							</tbody>
+						</table>
+						<div class="catalogue__foot">
+							<p>
+								List them with <code>anomalyguard detectors</code>. Any detector accepts
+								<code>columns</code>, <code>threshold</code> and <code>contamination</code>, and any
+								can run per group with <code>group_by</code>.
+							</p>
+							<a class="more" href={docs('reference/detectors')}>Detector reference</a>
+						</div>
+					</div>
+				</div>
+			</section>
+
+			<!-- quickstart -->
+			<section class="section section--tint" id="quickstart" aria-labelledby="qs-title">
+				<div class="wrap">
+					<div class="section__head reveal">
+						<h2 id="qs-title">From pip install to a cleaned file in five commands.</h2>
+						<p>
+							The demo generator writes the same labelled orders data the benchmarks use, so every
+							command below works on a fresh install. Drop the pipeline file next to your data to make
+							it repeatable.
+						</p>
+					</div>
+					<div class="qs">
+						<div class="qs__col reveal">
+							<figure class="code-card">
+								<div class="code-card__head">
+									<span>shell</span>
+									<button class="copy" type="button" data-copy-text={quickstart} aria-label="Copy the quickstart commands"><Fragment set:html={copyIcon} /><span>Copy</span></button>
+								</div>
+								<pre class="term"><code set:html={highlightShell(quickstart)} /></pre>
+							</figure>
+							<p>Using uv in a clone of the repository? Prefix each command with <code>uv run</code>. <a href={docs('installation')}>Installation options</a></p>
+						</div>
+						<div class="qs__col reveal">
+							<figure class="code-card">
+								<div class="code-card__head">
+									<span>pipeline.yaml</span>
+									<button class="copy" type="button" data-copy-text={pipelineYaml} aria-label="Copy the pipeline YAML"><Fragment set:html={copyIcon} /><span>Copy</span></button>
+								</div>
+								<pre class="term"><code set:html={highlightYaml(pipelineYaml.trimEnd())} /></pre>
+							</figure>
+							<p>Run it with <code>anomalyguard run pipeline.yaml</code>. <a href={docs('reference/pipeline-yaml')}>Every key in the pipeline YAML</a></p>
+						</div>
+					</div>
+				</div>
+			</section>
+
+			<!-- FAQ -->
+			<section class="section" id="faq" aria-labelledby="faq-title">
+				<div class="wrap faq">
+					<div class="section__head reveal" style="grid-template-columns: minmax(0, 1fr); align-items: start;">
+						<h2 id="faq-title">Questions</h2>
+						<p>More in <a href={docs('guides/troubleshooting')}>Troubleshooting and FAQ</a>.</p>
+					</div>
+					<div class="faq__list reveal">
+						{
+							faqs.map((f) => (
+								<details>
+									<summary>{f.q}</summary>
+									<div class="answer">
+										{f.a.map((p) => (
+											<p set:html={p} />
+										))}
+									</div>
+								</details>
+							))
+						}
+					</div>
+				</div>
+			</section>
+
+			<section class="section section--tint" aria-labelledby="closing-title">
+				<div class="wrap closing reveal">
+					<h2 id="closing-title">Point it at a table and see what it finds.</h2>
+					<div class="closing__ctas">
+						<a class="btn btn--primary" href={docs('quickstart')}>Read the quickstart</a>
+						<a class="btn btn--ghost" href={RELEASES}>Download a release</a>
+					</div>
+				</div>
+			</section>
+		</main>
+
+		<footer class="footer">
+			<div class="wrap footer__grid">
+				<div>
+					<a class="brand" href={`${base}/`}>
+						<img src={`${base}/favicon.svg`} alt="" width="22" height="22" />
+						AnomalyGuard
+					</a>
+					<p><small>v{VERSION} · MIT license · Data anomaly detection and remediation for Python.</small></p>
+				</div>
+				<nav aria-label="Footer">
+					<ul class="footer__links">
+						<li><a href={docs('introduction')}>Docs</a></li>
+						<li><a href={docs('quickstart')}>Quickstart</a></li>
+						<li><a href={docs('changelog')}>Changelog</a></li>
+						<li><a href={REPO}>GitHub</a></li>
+						<li><a href={RELEASES}>Releases</a></li>
+						<li><a href={`${REPO}/issues`}>Issues</a></li>
+					</ul>
+				</nav>
+			</div>
+		</footer>
+
+		<script>
+			// theme toggle (shares Starlight's storage key so the docs follow along)
+			const root = document.documentElement;
+			const media = window.matchMedia('(prefers-color-scheme: dark)');
+			const current = () => root.dataset.theme || (media.matches ? 'dark' : 'light');
+			document.querySelector('.theme-toggle')?.addEventListener('click', () => {
+				const next = current() === 'dark' ? 'light' : 'dark';
+				root.dataset.theme = next;
+				try {
+					localStorage.setItem('starlight-theme', next);
+				} catch {
+					/* storage unavailable: the choice lasts for this page view */
+				}
+			});
+
+			// copy buttons
+			for (const btn of document.querySelectorAll<HTMLButtonElement>('button.copy')) {
+				btn.addEventListener('click', async () => {
+					const sel = btn.dataset.copy;
+					const text = sel ? (document.querySelector(sel)?.textContent ?? '') : (btn.dataset.copyText ?? '');
+					const label = btn.querySelector('span');
+					try {
+						await navigator.clipboard.writeText(text.trim());
+						btn.dataset.state = 'done';
+						if (label) label.textContent = 'Copied';
+					} catch {
+						if (label) label.textContent = 'Select and copy';
+					}
+					window.setTimeout(() => {
+						delete btn.dataset.state;
+						if (label) label.textContent = 'Copy';
+					}, 1600);
+				});
+			}
+
+			// section reveal: fade and rise once when scrolled into view
+			const items = document.querySelectorAll('.reveal');
+			if ('IntersectionObserver' in window) {
+				const io = new IntersectionObserver(
+					(entries) => {
+						for (const e of entries) {
+							if (e.isIntersecting) {
+								e.target.classList.add('is-in');
+								io.unobserve(e.target);
+							}
+						}
+					},
+					{ rootMargin: '0px 0px -8% 0px', threshold: 0.05 },
+				);
+				items.forEach((el) => io.observe(el));
+			} else {
+				items.forEach((el) => el.classList.add('is-in'));
+			}
+		</script>
+	</body>
+</html>

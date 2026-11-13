@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anomalyguard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Data anomaly detection and remediation: ingest, validate, detect, fix, alert and monitor - algorithms built from scratch."
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,9 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/anomalyguard"]
+# the prebuilt web app (built from web/ with `pnpm build`); listed as artifacts so it
+# ships even if a build directory is ignored by version control
+artifacts = ["src/anomalyguard/monitor/static/**"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/anomalyguard", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
@@ -67,7 +70,7 @@ filterwarnings = [
 line-length = 100
 target-version = "py310"
 src = ["src", "tests"]
-extend-exclude = ["plans"]  # design documents: keep their code sketches as written
+extend-exclude = ["plans", "site", "web"]  # design documents keep their sketches; docs snippets stay as written
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

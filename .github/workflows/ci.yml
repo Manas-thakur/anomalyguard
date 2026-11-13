@@ -44,6 +44,53 @@ jobs:
           uv run anomalyguard run examples/pipeline.yaml
           uv run anomalyguard demo benchmark --datasets sensor
 
+  web:
+    # the React app in web/ is built into src/anomalyguard/monitor/static and the
+    # output is committed (pip installs need no Node); this job checks it is current
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Colour contrast (WCAG AA)
+        run: pnpm contrast
+
+      - name: Build
+        run: pnpm build
+
+      - name: Committed build is up to date
+        working-directory: .
+        run: |
+          git add -N src/anomalyguard/monitor/static
+          git diff --exit-code --stat src/anomalyguard/monitor/static || {
+            echo "::error::src/anomalyguard/monitor/static is out of date: run 'pnpm build' in web/ and commit the result"
+            exit 1
+          }
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -53,7 +100,9 @@ jobs:
       - name: Build sdist and wheel
         run: uv build
       - name: Wheel ships the web app
-        run: unzip -l dist/*.whl | grep -q "anomalyguard/monitor/static/index.html"
+        run: |
+          unzip -l dist/*.whl | grep -q "anomalyguard/monitor/static/index.html"
+          unzip -l dist/*.whl | grep -q "anomalyguard/monitor/static/assets/.*\.js"
 
   docker:
     runs-on: ubuntu-latest

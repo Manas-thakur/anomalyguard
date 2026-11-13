@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AnomalyGuard</title>
+    <meta name="description" content="Data quality monitoring: incidents with expected ranges, a triage inbox, and fixes you can review." />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      // apply the saved theme before first paint (no flash)
+      try {
+        var t = localStorage.getItem("ag.theme");
+        var dark = t === "dark" || (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.classList.add("dark");
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript><p style="padding: 24px; font-family: sans-serif">AnomalyGuard needs JavaScript enabled.</p></noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

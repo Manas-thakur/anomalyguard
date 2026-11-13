@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="AnomalyGuard">
+  <rect width="32" height="32" rx="7" fill="#2f5bea"/>
+  <rect x="5" y="13" width="22" height="9" rx="1.5" fill="#ffffff" fill-opacity="0.22"/>
+  <path d="M5 19.5 L10 16.5 L14 18 L18 15.5" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="23.5" cy="8.5" r="3" fill="#ffffff"/>
+</svg>

@@ -21,3 +21,19 @@ out/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Web app (web/): dependencies and tool caches; the build output in
+# src/anomalyguard/monitor/static/ IS committed so pip installs need no Node
+web/node_modules/
+web/dist/
+web/coverage/
+web/.vite/
+*.tsbuildinfo
+.eslintcache
+
+# Documentation site (site/): dependencies, build output and generated files
+site/node_modules/
+site/dist/
+site/.astro/
+site/public/screenshots/
+site/src/content/docs/docs/changelog.md

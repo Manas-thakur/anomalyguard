@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -52,9 +53,37 @@ def analyze(client: TestClient, dataset_id: str, **options) -> dict:
 def test_index_and_static(client):
     page = client.get("/")
     assert page.status_code == 200 and "<title>AnomalyGuard</title>" in page.text
-    assert client.get("/static/css/app.css").status_code == 200
-    assert client.get("/static/js/app.js").status_code == 200
     assert page.headers["x-content-type-options"] == "nosniff"
+    # every script and stylesheet the built page references is served, hashed assets cached for good
+    assets = re.findall(r'(?:src|href)="(/static/[^"]+)"', page.text)
+    assert any(a.endswith(".js") for a in assets) and any(a.endswith(".css") for a in assets)
+    for path in assets:
+        r = client.get(path)
+        assert r.status_code == 200, path
+        if "/assets/" in path:
+            assert "immutable" in r.headers["cache-control"]
+    assert client.get("/static/nope.js").status_code == 404
+
+
+def test_spa_fallback(client):
+    # client-side routes return the app, so links and reloads work
+    for path in (
+        "/runs/12",
+        "/review?status=all",
+        "/analyze/a/abc123",
+        "/pipelines/x",
+        "/settings",
+    ):
+        r = client.get(path)
+        assert r.status_code == 200 and "<title>AnomalyGuard</title>" in r.text, path
+        assert r.headers["cache-control"] == "no-cache"
+    # API routes, static files and the liveness probe are never shadowed
+    assert client.get("/api/does-not-exist").status_code == 404
+    assert client.get("/api/does-not-exist").headers["content-type"].startswith("application/json")
+    assert client.get("/static/missing.css").status_code == 404
+    assert client.get("/favicon.ico").status_code == 404
+    assert client.get("/health").json()["status"] == "ok"
+    assert client.post("/runs/12").status_code == 405
 
 
 def test_upload_profile_and_limits(client, orders_csv, tmp_path):
@@ -88,7 +117,10 @@ def test_upload_profile_and_limits(client, orders_csv, tmp_path):
         == 413
     )
     assert client.get("/api/datasets/nothere/profile").status_code == 404
-    assert client.get("/api/datasets/../../x/profile").status_code == 404
+    # dot segments are normalised away, so this never reaches a dataset (it is the web app's 404 page)
+    escaped = client.get("/api/datasets/../../x/profile")
+    assert escaped.status_code == 404 or escaped.headers["content-type"].startswith("text/html")
+    assert not escaped.headers["content-type"].startswith("application/json")  # no data leaks
     assert client.delete(f"/api/datasets/{meta['id']}").json()["deleted"] == meta["id"]
     assert client.get(f"/api/datasets/{meta['id']}").status_code == 404
 

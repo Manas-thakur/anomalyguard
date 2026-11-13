@@ -1,0 +1,146 @@
+---
+title: Web app
+description: A tour of the AnomalyGuard web app - Health, Analyze, Runs, incidents, the Review inbox, Pipelines, Settings and keyboard shortcuts.
+---
+
+import Shot from '../../../../components/Shot.astro';
+
+`anomalyguard serve` starts the web app and the [HTTP API](/anomalyguard/docs/reference/http-api/) on `http://127.0.0.1:8765`. It needs the `server` extra. The app is built with React and shadcn/ui and ships prebuilt inside the Python package, so no Node.js is needed to run it, and it loads nothing from a CDN.
+
+```bash
+anomalyguard serve                       # state in ./.anomalyguard, pipelines from ./pipelines and ./examples
+anomalyguard serve --port 9000 --pipeline-dir my_pipelines
+```
+
+It follows the system light or dark preference (with a toggle), works down to phone width, and every page can be driven from the keyboard. If the server has an [API key](/anomalyguard/docs/guides/deployment/#api-key), the app asks for it once and remembers it in the browser.
+
+## Pages and routes
+
+| Route | Page |
+|---|---|
+| `/` | [Health](#health): the overview (the start page) |
+| `/analyze` | [Analyze](#analyze): upload a file or pick a sample |
+| `/analyze/d/:datasetId` | An uploaded dataset: profile and detection options |
+| `/analyze/a/:analysisId` | An analysis: incidents, data, fix & export |
+| `/runs` | [Runs](#runs): every pipeline run and analysis |
+| `/runs/:id` | [Run detail](#run-detail) |
+| `/review` | [Review inbox](#review-inbox) |
+| `/pipelines` | [Pipelines](#pipelines) |
+| `/pipelines/:id` | One pipeline: YAML editor, recent runs, run now |
+| `/settings` | [Settings](#settings) |
+
+Every route can be bookmarked and reloaded: the server answers non-API paths with the app. (`/health` itself is the server's JSON liveness probe, so the Health page lives at `/`; links from the previous hash-based UI such as `/#/runs/12` are redirected.)
+
+## Health
+
+<Shot name="health.png" alt="Health page: KPIs, one row per source with status, quality sparkline, trend and open incidents, and recent incidents" />
+
+The start page. At the top: open incidents, sources monitored, average quality and rows scanned. Below, one row per source (each pipeline and each analysed file) with a status dot (failing, degraded, warning, healthy; see [Health](/anomalyguard/docs/concepts/incidents/#health)), a quality sparkline, a trend arrow, the number of open incidents and the last run. Next to it, a feed of recent incidents, and quality and anomaly-rate trends over time.
+
+## Analyze
+
+Analyze a file without writing a pipeline. Every analysis is also recorded as a run named `analysis:<file>`, so it appears on Health and Runs and takes part in the feedback loop.
+
+1. **Upload.** Drag in a CSV, TSV, JSON, JSONL or Parquet file (optionally gzip-compressed), or start from a sample dataset (orders, or hourly sensor readings). The upload limit is 100 MB by default.
+
+   <Shot name="analyze-profile.png" alt="Dataset profile: inferred column types, statistics and histograms, and the quality score" />
+
+2. **Profile.** The inferred schema, per-column statistics and histograms, and the quality score with its completeness, validity, uniqueness and freshness.
+3. **Detect.** Choose detectors, an optional group-by column (for contextual anomalies), an optional time column, and a sensitivity (low, medium or high), then run. The analysis runs as a background job.
+
+   <Shot name="analyze-results.png" alt="Analysis results: incident cards first, with the data table in another tab" />
+
+4. **Results.** Incidents first (the same cards as for a run), then the data table with every anomalous cell highlighted by severity and its reasons on hover or click, filterable by column, detector and severity.
+5. **Fix & export.** Pick a remediation strategy per column, preview the before/after diff of every changed cell, then download the cleaned CSV, the Markdown or JSON report, the anomalies JSON or the inferred schema. **Send to review** puts the flagged values in the review queue.
+
+   <Shot name="fix-export.png" alt="Fix and export: per-column strategies, the cell-level diff and download buttons" />
+
+## Runs
+
+All pipeline runs and analyses, newest first, filterable by source, status, kind (pipeline or analysis) and text.
+
+### Run detail
+
+A run opens on its **incidents**. Other tabs hold the sortable, paginated findings table (with feedback buttons), the remediation summary, the alerts that were sent and downloads of the run's outputs.
+
+### Incident triage
+
+<Shot name="incidents.png" alt="Incident cards with the expected range, the actual value, a chart with the band shaded, and triage buttons" />
+
+Each card has the incident's tag, a one-sentence explanation, the expected range next to the actual value, a chart and these actions (see [Incidents](/anomalyguard/docs/concepts/incidents/)):
+
+- **Mark as normal**: false-positive feedback for every finding; rejects matching pending review items.
+- **Confirm**: true-positive feedback; queues the flagged cells for review.
+- **Mute 24h**: hides this kind of incident on this source and column for 24 hours, on later runs too.
+- **Reopen**: clears a triage decision.
+
+**Show muted** reveals muted incidents, where a mute can be removed.
+
+<Shot name="incidents-timeseries.png" alt="A time-series incident: the expected band follows the daily cycle and readings outside it are marked" />
+
+## Review inbox
+
+<Shot name="review-inbox.png" alt="Review inbox: the item list with a selection and the bulk bar on the left, the open item on the right" />
+
+A split view: the list on the left, the open item on the right with its full data row, every finding on that row and an editable final value. Filters (status, source, column, detector, search) and paging run on the server, so it stays fast with many items. On a phone the item opens as a sheet.
+
+| Key | Action |
+|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd> | Next / previous item |
+| <kbd>a</kbd> | Approve (the selection, or the open item) |
+| <kbd>r</kbd> | Reject: keep the original value |
+| <kbd>m</kbd> | Mark as normal (false positive) |
+| <kbd>e</kbd> | Edit the final value |
+| <kbd>x</kbd> | Select or deselect the open item (<kbd>Shift</kbd> + <kbd>x</kbd> selects a range) |
+| <kbd>Shift</kbd> + click | Select a range |
+| <kbd>Esc</kbd> | Clear the selection or close the item |
+
+With items selected, a **bulk bar** approves, rejects, applies or marks them as false positives. **Select all matching** extends the action to every item that matches the current filters, across pages. **Apply** writes approved values into the cleaned file of the analysis the items came from; items from pipeline runs stay approved (see [Applying decisions](/anomalyguard/docs/concepts/review-and-feedback/#applying-decisions)).
+
+## Pipelines
+
+<Shot name="pipelines.png" alt="Pipelines page: pipeline files with their status, and the YAML editor" />
+
+Lists the pipeline YAML files in the pipeline folders (`pipelines/` and `examples/` under the working directory by default) and whether each one is valid. Open one to:
+
+- edit the YAML (<kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>S</kbd> saves) and **validate** it (errors and warnings, such as a missing source file, are shown inline) before saving;
+- **Run now**: runs the pipeline as a background job and records it in the server's database; a notification links to the new run;
+- see its recent runs.
+
+**New pipeline** creates a file in the first pipeline folder from a template (`csv_quality`, `timeseries_monitor`, `database_quality`), pointing at a path or at an uploaded dataset.
+
+The web app runs pipelines on demand only; for schedules use `anomalyguard run --schedule` (see [Pipelines](/anomalyguard/docs/concepts/pipelines/#running-and-scheduling)).
+
+## Settings
+
+- Server configuration: API key status (never the key), CORS origins, upload limit, pipeline folders, job threads, state directory and database.
+- **Detector thresholds**: the multiplier per detector, editable by hand (0.1 to 10), resettable, and **Tune from feedback** with the precision behind each detector.
+- Notifiers of every pipeline, with whether their secrets are available.
+- Installed extras and environment variables (set or not; secret values are never shown).
+
+## Command palette and shortcuts
+
+<Shot name="command-palette.png" alt="Command palette with pages, sample analyses, runs and pipelines" />
+
+<kbd>Ctrl</kbd> + <kbd>K</kbd> (<kbd>Cmd</kbd> + <kbd>K</kbd> on macOS) opens the command palette: go to any page, open a run by typing its number, run a pipeline, analyze a sample dataset, upload a file, create a pipeline, or switch the theme.
+
+| Key | Action |
+|---|---|
+| <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>K</kbd> | Command palette |
+| <kbd>?</kbd> | Show all keyboard shortcuts |
+| <kbd>g</kbd> then <kbd>h</kbd> | Go to Health |
+| <kbd>g</kbd> then <kbd>r</kbd> | Go to Runs |
+| <kbd>g</kbd> then <kbd>i</kbd> | Go to the Review inbox |
+| <kbd>g</kbd> then <kbd>a</kbd> | Go to Analyze |
+| <kbd>g</kbd> then <kbd>p</kbd> | Go to Pipelines |
+| <kbd>g</kbd> then <kbd>s</kbd> | Go to Settings |
+| <kbd>/</kbd> | Focus the search field on the page |
+| <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>B</kbd> | Collapse or expand the sidebar |
+
+The **Jobs** menu in the header is a queue of background jobs (analyses and pipeline runs): running jobs show their current step and progress, finished ones link to their result.
+
+## On a phone
+
+The navigation collapses into a menu, tables scroll inside their own box, and the review item opens as a bottom sheet.
+
+<Shot name="mobile.png" alt="The web app at phone width" />

@@ -121,6 +121,8 @@ class LLMSuggester:
     def suggest(
         self, record: dict[str, Any], column: str, value: Any, reason: str
     ) -> Suggestion | None:
+        if hasattr(value, "item"):  # numpy scalar -> plain Python, so the prompt reads 3035.34
+            value = value.item()
         prompt = PROMPT.format(
             column=column, value=value, reason=reason, record=json.dumps(record, default=str)
         )

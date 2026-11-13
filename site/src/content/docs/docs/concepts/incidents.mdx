@@ -1,0 +1,69 @@
+---
+title: Incidents
+description: How findings are grouped into incidents with an expected range, and how to triage and mute them.
+---
+
+import Shot from '../../../../components/Shot.astro';
+
+A single run can produce thousands of findings. People act on **incidents** instead: the web app and the API group a run's findings by **source, column and kind**, and show each group as one card, most severe first.
+
+<Shot name="incidents.png" alt="Incident cards for a pipeline run: values higher than expected, with the expected range shaded and the flagged values marked" />
+
+## Kinds and tags
+
+Each incident has a plain-language tag:
+
+| Kind | Tag |
+|---|---|
+| outlier (a column's values) | Values higher than expected / Values lower than expected / Values outside the expected range |
+| pattern (a time series) | Values higher than expected / Values lower than expected / Values off the usual pattern |
+| level shift | Level shift detected |
+| multivariate (an odd combination, from `iforest`, `lof`, `knn`) | Unusual combinations of values |
+| missing values | Missing values / Missing values spiked (more than the previous run) |
+| duplicates | Duplicate rows |
+| schema violations | Values break the schema |
+
+## Expected versus actual
+
+Each card has a one-sentence explanation and puts the **expected range** next to the **actual** worst value, with the change:
+
+- For a column, the expected range is a robust band: the median ± 3.5 × 1.4826 × MAD, the same cut-off the `mad` detector uses.
+- For a time series it is trend + seasonality ± the same band of the residual.
+- For a level shift it is the level before the shift.
+- The change is measured from the nearest edge of the band, so "+46% above range" means past the band, not past the median.
+
+When a value is unusual only within its group (for example with `group_by: region`), the sentence says so, so a marked value inside the overall band is not a surprise.
+
+## Charts
+
+Cards that have a chart show:
+
+- **distribution** (tabular columns): a histogram with the band shaded, flagged values marked on a strip below, and far-out values collected in an overflow lane so one extreme value does not flatten the chart;
+- **series** (time series): the line with the expected band shaded, the expected line dashed and flagged readings marked; it opens on a window around the anomaly with a toggle to the full history;
+- **history** (missing values, duplicates, schema violations): the metric over the source's recent runs.
+
+Incidents and charts need the run's data: the uploaded file for an analysis, or the pipeline's source file if it is still on disk.
+
+<Shot name="incidents-timeseries.png" alt="A temperature series with its expected band; readings outside it are marked" caption="A time-series incident: the expected band follows the daily cycle." />
+
+## Triage
+
+| Action | What it does |
+|---|---|
+| **Mark as normal** | Records every finding of the incident as a false positive (so [tuning](/anomalyguard/docs/concepts/review-and-feedback/) raises that detector's threshold) and rejects matching pending review items. Status becomes `normal`. |
+| **Confirm** | Records true positives and sends the flagged cells to the review queue. For outliers, the suggested value is the actual value capped to the band. Status becomes `confirmed`. |
+| **Reopen** | Clears the triage status. |
+| **Mute 24h** | Hides this kind of incident on this source and column for 24 hours, including on later runs. Muted incidents are hidden behind a **Show muted** toggle; mutes can be removed early. |
+
+Through the API, mutes accept any duration from just above 0 to 720 hours. See the [HTTP API reference](/anomalyguard/docs/reference/http-api/#incidents).
+
+## Health
+
+The **Health** page summarises incidents per source (each pipeline, and each analysed file):
+
+- **failing**: the last run failed;
+- **degraded**: an open high-severity incident, or a quality score below 0.9;
+- **warning**: open incidents;
+- **healthy**: none of the above.
+
+Each row also shows a quality sparkline, the trend since the previous run, the number of open incidents and the last run.

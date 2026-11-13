@@ -1,0 +1,26 @@
+---
+// A screenshot of the web app, for docs pages. Renders a placeholder when the
+// image has not been added to docs/screenshots yet, so the build never breaks.
+import { shot } from '../lib/shots';
+
+interface Props {
+	name: string;
+	alt: string;
+	caption?: string;
+}
+const { name, alt, caption } = Astro.props;
+const info = shot(name);
+---
+
+<figure class="shot not-content">
+	{
+		info.exists ? (
+			<img src={info.src} alt={alt} width={info.width} height={info.height} loading="lazy" decoding="async" />
+		) : (
+			<div class="shot--missing" role="img" aria-label={alt}>
+				Screenshot not available yet ({name}). {alt}
+			</div>
+		)
+	}
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>

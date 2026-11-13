@@ -1,7 +1,10 @@
 """FastAPI backend for the web app (install with ``anomalyguard[server]``).
 
-The UI is plain HTML/CSS/JS in ``monitor/static`` (no build step). Everything
-it does goes through the JSON API below; OpenAPI docs are at ``/api/docs``.
+The UI is a React app built from ``web/`` into ``monitor/static`` (the build
+output ships in the package, so no Node is needed at runtime). Everything it
+does goes through the JSON API below; OpenAPI docs are at ``/api/docs``. Other
+GET paths return the app's ``index.html`` so client-side routes can be
+bookmarked and reloaded.
 """
 
 from __future__ import annotations
@@ -49,16 +52,30 @@ CHUNK = 1024 * 1024
 
 
 class _StaticFiles(StaticFiles):
-    """Static assets that the browser revalidates, so an upgrade is never half-cached."""
+    """Static assets: content-hashed build output is cached for good, the rest is
+    revalidated, so an upgrade is never half-cached."""
 
     async def get_response(self, path: str, scope):  # type: ignore[override]
         response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
+        if response.status_code == 200 and path.replace("\\", "/").startswith("assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
 
+MISSING_BUILD_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>AnomalyGuard</title></head><body style="font-family: sans-serif; padding: 24px">
+<h1>AnomalyGuard</h1><p>The web app has not been built. Run <code>pnpm install</code> and
+<code>pnpm build</code> in <code>web/</code>, or install a released package. The REST API
+is available at <a href="/api/docs">/api/docs</a>.</p></body></html>"""
+
+
 def dashboard_html() -> str:
-    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    index = STATIC_DIR / "index.html"
+    if not index.is_file():
+        return MISSING_BUILD_HTML
+    return index.read_text(encoding="utf-8")
 
 
 def _total(response: Response, total: int) -> None:
@@ -994,5 +1011,14 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
             "precision": loop.precision(),
             "cwd": os.getcwd(),
         }
+
+    # -- client-side routes (registered last so every API route wins) ------------
+    @app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
+    def spa(path: str) -> HTMLResponse:
+        """Serve the web app for its own routes (``/runs/12``, ``/review``, ...)."""
+        first = path.split("/", 1)[0]
+        if first in ("api", "static") or path == "health" or "." in path.rsplit("/", 1)[-1]:
+            raise HTTPException(404, "Not found")
+        return HTMLResponse(dashboard_html(), headers={"Cache-Control": "no-cache"})
 
     return app

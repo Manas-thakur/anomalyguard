@@ -1,0 +1,97 @@
+/* Docs theme: same cobalt accent and type as the landing page and the web app. */
+:root {
+	--sl-font: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--sl-font-mono: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Code', Menlo, monospace;
+	--ag-font-display: 'Space Grotesk Variable', 'Inter Variable', system-ui, sans-serif;
+
+	/* dark (Starlight's default) */
+	--sl-color-accent-low: oklch(28% 0.09 262);
+	--sl-color-accent: oklch(66% 0.17 258);
+	--sl-color-accent-high: oklch(88% 0.06 258);
+	--sl-color-white: oklch(97% 0.005 255);
+	--sl-color-gray-1: oklch(91% 0.01 255);
+	--sl-color-gray-2: oklch(80% 0.015 256);
+	--sl-color-gray-3: oklch(66% 0.018 257);
+	--sl-color-gray-4: oklch(48% 0.02 258);
+	--sl-color-gray-5: oklch(33% 0.02 259);
+	--sl-color-gray-6: oklch(23% 0.018 260);
+	--sl-color-black: oklch(17.5% 0.015 260);
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: oklch(93% 0.035 258);
+	--sl-color-accent: oklch(52% 0.2 262);
+	--sl-color-accent-high: oklch(33% 0.13 264);
+	--sl-color-white: oklch(22% 0.02 258);
+	--sl-color-gray-1: oklch(28% 0.02 258);
+	--sl-color-gray-2: oklch(36% 0.02 257);
+	--sl-color-gray-3: oklch(50% 0.018 256);
+	--sl-color-gray-4: oklch(66% 0.014 255);
+	--sl-color-gray-5: oklch(86% 0.008 255);
+	--sl-color-gray-6: oklch(95% 0.005 255);
+	--sl-color-gray-7: oklch(97.5% 0.004 250);
+	--sl-color-black: oklch(99% 0.003 250);
+}
+
+.sl-markdown-content :is(h1, h2, h3),
+h1#_top {
+	font-family: var(--ag-font-display);
+	letter-spacing: -0.015em;
+}
+
+.site-title {
+	font-family: var(--ag-font-display);
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+/* Screenshots */
+.shot {
+	margin-block: 1.5rem;
+}
+.shot img {
+	display: block;
+	width: 100%;
+	height: auto;
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.5rem;
+}
+.shot figcaption {
+	margin-top: 0.5rem;
+	font-size: var(--sl-text-sm);
+	color: var(--sl-color-gray-3);
+}
+.shot--missing {
+	display: grid;
+	place-items: center;
+	min-height: 8rem;
+	padding: 1.5rem;
+	border: 1px dashed var(--sl-color-gray-4);
+	border-radius: 0.5rem;
+	color: var(--sl-color-gray-3);
+	font-size: var(--sl-text-sm);
+	text-align: center;
+}
+
+/* Wide reference tables scroll inside their own box on small screens */
+.sl-markdown-content table {
+	display: block;
+	overflow-x: auto;
+}
+.sl-markdown-content td code {
+	white-space: nowrap;
+}
+.sl-markdown-content td code.wrap,
+.sl-markdown-content td:last-child code {
+	white-space: normal;
+}
+
+kbd {
+	font-family: var(--sl-font-mono);
+	font-size: 0.85em;
+	padding: 0.05em 0.4em;
+	border: 1px solid var(--sl-color-gray-5);
+	border-bottom-width: 2px;
+	border-radius: 0.3rem;
+	background: var(--sl-color-gray-6);
+}

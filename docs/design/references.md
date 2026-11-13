@@ -2,8 +2,51 @@
 
 The web app borrows interaction patterns from three data and issue tools. We
 took the patterns, not the look: no logos, colours, type or assets were copied.
-AnomalyGuard keeps its own cobalt accent, Inter and JetBrains Mono, and draws its
-charts itself.
+AnomalyGuard keeps its own cobalt accent, Inter and JetBrains Mono (self-hosted),
+and its own chart design.
+
+## 0. The component kit (0.3.0)
+
+**Choice.** React 19 + TypeScript, built with Vite, styled with Tailwind CSS v4 and
+[shadcn/ui](https://ui.shadcn.com) components (Radix primitives underneath). Charts
+use shadcn's chart wrapper around Recharts; tables use shadcn's data-table pattern
+on TanStack Table. A few [AI Elements](https://ui.shadcn.com/docs/ai-elements)
+patterns (Task, Queue, Shimmer and Confirmation) show work in progress: the
+analysis job's steps, the background-job queue in the header, and the inline
+confirmation before flagged values go to review or approved values are written
+into cleaned data. The source is in `web/`; the build is committed into
+`src/anomalyguard/monitor/static/` so the Python package still runs without Node.
+
+**Why this kit.**
+
+- **The UX needed components we were hand-rolling badly.** The 0.2 app had its
+  own dialog, popover, combobox, tab, toast and drawer code. Radix gives these with
+  correct focus management, keyboard support and ARIA roles (dialog, listbox,
+  tablist, menu), which is where most of the remaining accessibility bugs were.
+- **shadcn/ui is code we own, not a dependency we style around.** Components are
+  copied into `web/src/components/ui/` and edited freely (the command dialog
+  forwards a custom fuzzy filter; the checkbox shows an indeterminate state; the
+  sidebar inset is not a second `<main>`). There is no theme layer to fight, and
+  the design tokens are plain CSS variables in `web/src/index.css`.
+- **Tailwind v4 tokens map one-to-one onto the old design tokens** (one accent,
+  severity hues, band and anomaly colours), so the visual system carried over and
+  both themes are defined in one place.
+- **Recharts through the shadcn chart container** themes charts with the same CSS
+  variables, gives tooltips and responsive sizing, and was enough for every chart
+  we draw: the distribution with its expected band and overflow lane, the series
+  band chart with its "around the anomaly" window, run-history bars, sparklines
+  and the trend chart.
+- **TanStack Table** is headless, so server-side paging, sorting and filters (which
+  the API already had) plug in without a client-side data model.
+- **Vite** builds in about a second and emits content-hashed assets that FastAPI
+  serves under `/static/` with long-lived caching; every other GET path returns
+  the app so client-side routes can be bookmarked.
+
+**Not adopted.** A component library with its own theme (MUI, Ant, Mantine): heavier,
+and the look is theirs. Next.js: the app is a single-page client of an existing
+API, so server rendering would add a Node runtime for nothing. A chart library
+with canvas rendering: our charts are small, and SVG keeps them accessible and
+crisp in screenshots.
 
 ## 1. Metaplane: incident view
 
@@ -98,7 +141,7 @@ and a compact sidebar groups pages under small section headers.
   `g` followed by a letter jumps between pages. The sidebar groups pages under
   *Monitor*, *Triage* and *Configure*.
 - **A calmer visual system.** One accent. Hairline borders, with elevation kept
-  for things that float (palette, toasts, sheets). Inter for text, mono for data.
+  for things that float (palette, toasts, sheets). Inter for text, JetBrains Mono for data.
   Spacing on a 4/8 px grid. Motion is 200 ms or less and is cut almost entirely
   under `prefers-reduced-motion`.
 - **Not adopted:** issue states, assignees and cycles. AnomalyGuard's review items
@@ -108,9 +151,9 @@ and a compact sidebar groups pages under small section headers.
 
 Every text and chart token was checked for WCAG contrast in both themes: text is
 at least 4.5:1, and chart marks, the focus ring and status dots are at least
-3:1. The flagged-value colour also passes against the shaded band. Identity is
+3:1 (`web/scripts/contrast.mjs` recomputes this from `web/src/index.css`). The flagged-value colour also passes against the shaded band. Identity is
 never carried by colour alone: tags carry text, status dots have text
-alternatives, charts have legends and `aria-label` summaries, and flagged marks
-are focusable with a text tooltip. Focus is always visible, and the tab bars,
+alternatives, charts have legends and a text summary for screen readers, and
+values far outside a chart's range are listed as text in its overflow lane. Focus is always visible, and the tab bars,
 palette and inbox follow the usual ARIA patterns (tablist, combobox + listbox,
 listbox with `aria-activedescendant`).

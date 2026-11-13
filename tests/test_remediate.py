@@ -193,6 +193,9 @@ def test_llm_suggester_ollama_and_openai():
         body = json.loads(request.content)
         assert request.url.path == "/api/generate" and body["format"] == "json"
         assert "unit_price" in body["prompt"]
+        assert (
+            "Current value: 900.5" + chr(10) in body["prompt"]
+        )  # numpy scalars read as plain numbers
         return httpx.Response(
             200,
             json={
@@ -201,7 +204,9 @@ def test_llm_suggester_ollama_and_openai():
         )
 
     llm = LLMSuggester("ollama", transport=httpx.MockTransport(ollama))
-    s = llm.suggest({"region": "north", "unit_price": 900}, "unit_price", 900, "outlier")
+    s = llm.suggest(
+        {"region": "north", "unit_price": 900.5}, "unit_price", np.float64(900.5), "outlier"
+    )
     assert s.value == 19.5 and s.confidence == 0.9
 
     def openai(request: httpx.Request) -> httpx.Response:

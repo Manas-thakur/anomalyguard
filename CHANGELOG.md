@@ -6,8 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
 ### Added
 
+- **Web app rebuilt on a component kit**: React 19, TypeScript, Vite, Tailwind CSS v4 and
+  shadcn/ui (Radix primitives), with Recharts through shadcn charts for the expected-band,
+  distribution, history, sparkline and trend charts, and TanStack Table for the runs, findings,
+  data and diff tables. The source lives in `web/`; `pnpm build` writes the app into
+  `src/anomalyguard/monitor/static/`, and the build output is committed and shipped in the wheel,
+  so installing and running AnomalyGuard still needs no Node.js. Fonts (Inter, JetBrains Mono)
+  are self-hosted; nothing loads from a CDN.
+- Client-side routes (`/runs/12`, `/review`, `/analyze/a/<id>`, ...) can be bookmarked and
+  reloaded: the server answers non-API GET paths with the app. The Health page is at `/`; links
+  from the previous hash-based UI (`/#/runs/12`) are redirected.
+- A **Jobs** menu in the header: a queue of running and finished analyses and pipeline runs with
+  their progress. The analysis setup shows the job's steps as they run.
+- Inline **confirmations** before sending flagged values to the review queue and before writing
+  approved items into cleaned data.
+- Skeleton loading states, toasts with undo for mutes, and empty and error states with a retry on
+  every page; the review item opens as a bottom sheet and the navigation as a sheet on phones.
+- `web/` checks: `pnpm typecheck`, `pnpm lint` (ESLint) and `pnpm test` (Vitest: API client,
+  formatters, the review-inbox keyboard reducer). CI builds the app and fails if the committed
+  build is out of date; the release workflow builds the app before the Python package.
+- **Documentation site and landing page** (Astro + Starlight) in `site/`, published to
+  https://manas-thakur.github.io/anomalyguard/ by `.github/workflows/pages.yml`: installation,
+  quickstart, concepts, detector, pipeline YAML, CLI, HTTP API and Python API references,
+  configuration, alerts, LLM-assisted remediation, deployment, benchmarks and troubleshooting.
+- `CONTRIBUTING.md`.
 - **Incidents**: findings of a run are grouped by source, column and kind. Each incident has a
   plain-language status tag, a one-sentence explanation, the expected range (robust MAD band, or
   trend + seasonality for time series) against the actual value, and a chart with the band shaded.
@@ -18,16 +44,28 @@ All notable changes to this project are documented here. The format follows
   sparkline, trend arrow, open incidents and last run, and a recent-incidents feed.
 - **Review inbox**: split-pane, keyboard-first triage (`j`/`k`, `a`, `r`, `m`, `e`, `x`,
   Shift+click ranges) with a bulk bar; a bottom sheet on phones.
-- **Command palette** (Ctrl/Cmd+K) and a shortcuts sheet (`?`); `g` + letter navigation.
+- **Command palette** (Ctrl/Cmd+K) and a shortcuts dialog (`?`); `g` + letter navigation.
 - Run metrics now include per-column null counts (analyses and pipeline runs), and analyses store
   schema violations by rule.
 - `docs/design/references.md`: the design references and what was adopted from each.
 
 ### Changed
 
+- Hashed web assets under `/static/assets/` are cached for a year (`immutable`); everything else
+  is revalidated.
+- The README was rewritten around the new app, with links to the documentation site.
 - Run detail and analysis results open on incidents; the data / findings table moved to a tab.
 - Calmer visual system: one accent, hairline borders, light elevation for floating surfaces,
   Inter for text, motion of 200 ms or less (and none under reduced motion).
+
+### Fixed
+
+- The LLM remediation prompt showed NumPy values as `np.float64(3035.34)`; it now shows `3035.34`.
+
+### Removed
+
+- The hand-written HTML/CSS/JS web app in `src/anomalyguard/monitor/static/` (replaced by the
+  React build).
 
 ## [0.2.0] - 2026-11-13
 
@@ -102,5 +140,6 @@ All notable changes to this project are documented here. The format follows
   declarative YAML pipelines with a scheduler, synthetic data and benchmarks, a CLI and a
   static dashboard.
 
-[Unreleased]: https://github.com/Manas-thakur/anomalyguard/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Manas-thakur/anomalyguard/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Manas-thakur/anomalyguard/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Manas-thakur/anomalyguard/releases/tag/v0.2.0
