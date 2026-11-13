@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from collections import Counter
 from dataclasses import dataclass, field
@@ -27,10 +28,58 @@ class AnomalyReport:
     index: list[Any] = field(default_factory=list)
     combine: Literal["any", "vote", "all"] = "any"
     min_votes: int = 1
+    #: grouped detector name -> its group columns (used by group-aware remediation)
+    groups: dict[str, list[str]] = field(default_factory=dict)
+    #: notes about how the data was analysed (gaps in a time series, clamped votes, ...)
+    warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.index:
             self.index = list(range(self.n_rows))
+
+    def tail(self, start: int) -> AnomalyReport:
+        """A report for rows ``start..n_rows`` only (row numbers restart at 0).
+
+        Used for incremental runs, where detectors are fitted on reference
+        rows plus the new batch but only the new rows are reported.
+        """
+        results = []
+        for r in self.results:
+            findings = []
+            for f in r.findings:
+                if f.row >= start:
+                    f = copy.copy(f)
+                    f.row -= start
+                    findings.append(f)
+            results.append(
+                DetectionResult(
+                    detector=r.detector,
+                    raw_scores=r.raw_scores[start:],
+                    scores=r.scores[start:],
+                    labels=r.labels[start:],
+                    threshold=r.threshold,
+                    columns=r.columns,
+                    findings=findings,
+                    column_scores=None if r.column_scores is None else r.column_scores[start:],
+                )
+            )
+        return AnomalyReport(
+            n_rows=self.n_rows - start,
+            results=results,
+            index=list(self.index[start:]),
+            combine=self.combine,
+            min_votes=self.min_votes,
+            groups=dict(self.groups),
+            warnings=list(self.warnings),
+        )
+
+    def group_columns(self, column: str) -> list[str] | None:
+        """Group columns of a grouped detector that flagged cells in ``column``."""
+        names = {f.detector for r in self.results for f in r.findings if f.column == column}
+        for name, cols in self.groups.items():
+            if name in names:
+                return cols
+        return None
 
     @property
     def detectors(self) -> list[str]:
@@ -137,12 +186,15 @@ class AnomalyReport:
         }
 
     def to_dict(self, limit: int | None = None) -> dict[str, Any]:
-        return {
+        out = {
             "summary": self.summary(),
             "thresholds": {r.detector: r.threshold for r in self.results},
             "anomalies": self.records(limit),
             "findings": [f.to_dict() for f in self.findings][: limit * 5 if limit else None],
         }
+        if self.warnings:
+            out["warnings"] = list(self.warnings)
+        return out
 
     def to_frame(self) -> pd.DataFrame:
         return pd.DataFrame([f.to_dict() for f in self.findings])

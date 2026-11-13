@@ -25,7 +25,7 @@ For example, `Problem:` would be `[region=east] unit_price=3035 has modified z-s
 
 The first JSON object in the reply is parsed into `{value, confidence, rationale}`; confidence is clamped to 0..1. The suggestion and its confidence are stored on the review item and shown in the review inbox, and approving the item without entering a value uses the suggestion.
 
-With `auto_apply: true`, a suggestion whose confidence is at least `min_confidence` is also written into the cleaned data, recorded as a change with strategy `llm`.
+With `auto_apply: true`, a suggestion whose confidence is at least `min_confidence` is also written into the cleaned data, recorded as a change with strategy `llm`. Its review item is queued with status `applied` (resolved value = the suggestion, note "applied automatically"), so the inbox only shows items that still need a decision.
 
 If the model cannot be reached or the reply has no usable JSON, remediation carries on without a suggestion; the reason (for example `LLM unavailable: ...`) is stored as the item's rationale.
 

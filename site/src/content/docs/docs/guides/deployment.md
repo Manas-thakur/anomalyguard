@@ -37,8 +37,9 @@ docker run -d --name anomalyguard --restart unless-stopped \
   ghcr.io/manas-thakur/anomalyguard
 ```
 
-- `/data/.anomalyguard` holds the database, uploads and analyses. The host folder must be writable by uid 1000.
-- `/data/pipelines` is scanned for pipeline YAML (along with the bundled `/data/examples`). Data files the pipelines read must be mounted too, at the paths the YAML refers to (relative to the YAML file).
+- `/data/.anomalyguard` holds the database, uploads, analyses and the pipelines you create or edit in the web app (`/data/.anomalyguard/pipelines`), so this one volume keeps everything the server writes. The host folder must be writable by uid 1000.
+- `/data/pipelines` is scanned for pipeline YAML you manage yourself (along with the bundled `/data/examples`). Data files the pipelines read must be mounted too, at the paths the YAML refers to (relative to the YAML file).
+- The image sets `ANOMALYGUARD_PIPELINE_DIRS=/data/.anomalyguard/pipelines,/data/pipelines,/data/examples`; the first folder is where the web app writes new pipelines. Override the variable to change that.
 - Publishing on `127.0.0.1:8765` keeps the port off the network so only the reverse proxy can reach it.
 
 A scheduler next to the web app, sharing the same state:

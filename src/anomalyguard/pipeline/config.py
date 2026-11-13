@@ -99,9 +99,9 @@ class PipelineConfig:
         if not self.schedule:
             return None
         if "interval_seconds" in self.schedule:
-            return float(self.schedule["interval_seconds"])
+            return _positive_seconds(self.schedule["interval_seconds"], "schedule.interval_seconds")
         if "every" in self.schedule:
-            return parse_duration(str(self.schedule["every"]))
+            return _positive_seconds(self.schedule["every"], "schedule.every")
         return None
 
     # -- loading --------------------------------------------------------
@@ -143,15 +143,23 @@ class PipelineConfig:
         try:
             data = yaml.safe_load(expand_env(text))
         except yaml.YAMLError as exc:
-            raise ConfigError(f"Invalid YAML: {exc}") from exc
+            raise ConfigError(f"Invalid YAML: {_yaml_error(exc)}") from exc
         return cls.from_dict(data, base_dir)
 
     @classmethod
     def load(cls, path: str | Path) -> PipelineConfig:
+        """Load and validate a pipeline file; errors name the file."""
         path = Path(path)
         if not path.exists():
             raise ConfigError(f"Pipeline file not found: {path}")
-        return cls.from_yaml(path.read_text(encoding="utf-8"), base_dir=path.resolve().parent)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ConfigError(f"{path}: cannot read file: {exc}") from exc
+        try:
+            return cls.from_yaml(text, base_dir=path.resolve().parent)
+        except ConfigError as exc:
+            raise ConfigError(f"{path}: {exc}") from exc
 
     def validate(self) -> None:
         from anomalyguard.alert.rules import AlertRule
@@ -164,7 +172,14 @@ class PipelineConfig:
             try:
                 build_detector(spec)
             except (KeyError, ValueError, TypeError) as exc:
-                raise ConfigError(f"Bad detector {spec!r}: {exc}") from exc
+                msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+                raise ConfigError(f"Bad detector {spec!r}: {msg}") from exc
+        if self.schedule is not None:
+            if not isinstance(self.schedule, dict):
+                raise ConfigError(
+                    "schedule must be a mapping, e.g. {every: 5m} or {interval_seconds: 300}"
+                )
+            self.interval_seconds  # noqa: B018 - parses (and so validates) the duration
         if self.remediation is not None:
             rem = {k: v for k, v in self.remediation.items() if k not in ("enabled", "llm")}
             try:
@@ -179,6 +194,32 @@ class PipelineConfig:
         combine = self.detection.get("combine", "any")
         if combine not in ("any", "vote", "all"):
             raise ConfigError("detection.combine must be any, vote or all")
+        ref = self.detection.get("reference_rows", 0)
+        if isinstance(ref, bool) or not isinstance(ref, int) or ref < 0:
+            raise ConfigError(f"detection.reference_rows must be a whole number >= 0 (got {ref!r})")
+
+
+def _yaml_error(exc: yaml.YAMLError) -> str:
+    """One-line description of a YAML error with its line and column."""
+    mark = getattr(exc, "problem_mark", None)
+    problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+    if mark is not None:
+        return f"{problem} (line {mark.line + 1}, column {mark.column + 1})"
+    return str(problem)
+
+
+def _positive_seconds(value: Any, field_name: str) -> float:
+    try:
+        if isinstance(value, bool):
+            raise ConfigError("not a duration")
+        seconds = float(value) if isinstance(value, (int, float)) else parse_duration(str(value))
+    except (ConfigError, ValueError) as exc:
+        raise ConfigError(
+            f"{field_name}: invalid duration {value!r} (use e.g. 30s, 5m, 2h, 1d)"
+        ) from exc
+    if not seconds > 0:
+        raise ConfigError(f"{field_name}: duration must be positive, got {value!r}")
+    return seconds
 
 
 def parse_duration(text: str) -> float:

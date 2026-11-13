@@ -75,8 +75,10 @@ def to_matrix(data: ArrayLike, columns: list[str] | None = None) -> tuple[np.nda
             if not pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
                 s = pd.to_numeric(_clean_numeric_strings(s), errors="coerce")
             mats.append(s.astype(float).to_numpy())
-        return np.column_stack(mats) if mats else np.empty((len(data), 0)), cols
+        X = np.column_stack(mats) if mats else np.empty((len(data), 0))
+        return np.where(np.isinf(X), np.nan, X), cols
     arr = np.asarray(data, dtype=float)
+    arr = np.where(np.isinf(arr), np.nan, arr)
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
     cols = list(columns) if columns else [f"x{i}" for i in range(arr.shape[1])]
@@ -105,6 +107,8 @@ def fmt(v: Any) -> str:
         return str(v)
     if np.isnan(f):
         return "NA"
+    if np.isinf(f):
+        return "inf" if f > 0 else "-inf"
     if f == int(f) and abs(f) < 1e12:
         return str(int(f))
     return f"{f:.4g}"
@@ -125,7 +129,7 @@ class Finding:
     def to_dict(self) -> dict[str, Any]:
         v = self.value
         if isinstance(v, (np.floating, float)):
-            v = None if np.isnan(v) else float(v)
+            v = None if not np.isfinite(v) else float(v)
         elif isinstance(v, np.integer):
             v = int(v)
         idx = self.index.item() if hasattr(self.index, "item") else self.index

@@ -12,6 +12,7 @@ from anomalyguard.detect.statistical import GrubbsDetector, IQRDetector, MADDete
 from anomalyguard.detect.timeseries import (
     CUSUMDetector,
     EWMADetector,
+    FlatlineDetector,
     RollingZScoreDetector,
     SeasonalResidualDetector,
 )
@@ -28,6 +29,7 @@ DETECTORS: dict[str, type[Detector]] = {
     "ewma": EWMADetector,
     "seasonal": SeasonalResidualDetector,
     "cusum": CUSUMDetector,
+    "flatline": FlatlineDetector,
 }
 
 ALIASES = {
@@ -46,12 +48,15 @@ ALIASES = {
     "stl": "seasonal",
     "changepoint": "cusum",
     "change_point": "cusum",
+    "flat_line": "flatline",
+    "stuck": "flatline",
+    "stuck_at": "flatline",
 }
 
 CATEGORIES = {
     "statistical": ["zscore", "mad", "iqr", "grubbs"],
     "ml": ["iforest", "lof", "knn"],
-    "timeseries": ["rolling_zscore", "ewma", "seasonal", "cusum"],
+    "timeseries": ["rolling_zscore", "ewma", "seasonal", "cusum", "flatline"],
 }
 
 
@@ -86,9 +91,21 @@ def build_detector(spec: str | dict[str, Any] | Detector) -> Detector:
     params.update(spec)  # allow params inline, e.g. {method: iforest, n_estimators: 50}
 
     if method == "ensemble":
-        members = [build_detector(m) for m in params.pop("detectors", [])]
+        raw_members = params.pop("detectors", None) or []
+        if isinstance(raw_members, str):
+            raw_members = [m.strip() for m in raw_members.split(",") if m.strip()]
+        if not raw_members:
+            raise ValueError(
+                "ensemble needs member detectors: give 'detectors: [mad, iforest]' "
+                "(CLI: --param ensemble.detectors=mad,iforest), or pass several detectors "
+                "with combine=vote"
+            )
+        members = [build_detector(m) for m in raw_members]
         combine = params.pop("combine", params.pop("method_", "mean"))
-        det: Detector = EnsembleDetector(members, method=combine, **params, **common)
+        try:
+            det: Detector = EnsembleDetector(members, method=combine, **params, **common)
+        except TypeError as exc:
+            raise ValueError(f"Invalid parameters for detector 'ensemble': {exc}") from exc
     else:
         cls = DETECTORS[canonical_name(method)]
         try:

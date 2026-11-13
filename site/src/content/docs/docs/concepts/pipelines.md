@@ -24,7 +24,7 @@ In the web app, **Pipelines → New pipeline** does the same, optionally pointin
 
 ## What a run does
 
-1. Read the source (only new rows when `state.incremental` is on). An empty read ends the run with status `empty`.
+1. Read the source (only new rows when `state.incremental` is on). An empty read ends the run with status `empty`. Incremental runs keep a reference window of earlier rows (`detection.reference_rows`, default 5,000): detectors are fitted on those rows plus the new batch, and only the new rows are reported, so a batch of three rows is judged against history rather than against itself. A batch under 30 rows with no reference rows (the first run, or `reference_rows: 0`) gives a warning.
 2. Load or infer the schema, validate and coerce, compute the quality score.
 3. Run the detectors on the coerced data, applying feedback threshold multipliers.
 4. Remediate according to the policy, and queue flagged values for review.

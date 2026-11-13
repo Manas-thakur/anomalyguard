@@ -18,11 +18,18 @@ A **source** reads data into a pandas DataFrame. In a [pipeline](/anomalyguard/d
 
 When `type` is omitted, it is guessed from the `path` or `url`: by extension for files, `sqlite:` / `postgresql:` / `mysql:` prefixes and `.db` / `.sqlite` / `.sqlite3` files for SQL, and `http(s)://` for REST.
 
-On the CLI, `profile`, `validate`, `detect` and `fix` accept `.csv`, `.tsv`, `.json`, `.jsonl` / `.ndjson` and `.parquet` files (optionally gzip-compressed). SQLite files need `--table NAME`.
+On the CLI, `profile`, `validate`, `detect` and `fix` accept `.csv`, `.tsv`, `.json`, `.jsonl` / `.ndjson` and `.parquet` files (optionally gzip-compressed). SQLite files need `--table NAME`; without it the error lists the tables in the file. An empty (0-byte) file, or one with a header but no rows, is an error rather than a perfect quality score.
+
+## How CSV files are read
+
+- **Missing values.** Only empty cells are missing. Text such as `NA`, `N/A`, `null`, `None` or `NaN` is kept as a value: `NA` is a common code for North America (or Namibia), and pandas' default list would silently turn it into a missing value that `fix` then imputes. Numeric columns with empty cells still parse as numbers with gaps, and a cell spelling `NaN` in a numeric column counts as missing, not invalid. To treat extra tokens as missing, pass `--na-values NA,N/A,null` on the CLI, or `na_values: [NA, "N/A", "null"]` in the source config.
+- **Delimiter.** When `delimiter` is not set, it is sniffed from the start of the file (`csv.Sniffer`, candidates `,` `;` TAB `|`) and accepted only if it splits the header and most rows into the same number of fields. Semicolon files whose numbers use a decimal comma (`3,14`) are read with `decimal=","`. If a file still parses to a single column whose header contains another delimiter, a warning says so. Rows with more fields than the header never become an index (pandas' default, which turned a semicolon file into made-up numbers): the file is rejected with a parse error, or, when pandas can still read it, the extra fields are dropped with a warning. Override with `--delimiter` / `--sep` (`'\t'` or `tab` for tabs) and `--decimal`.
+- **Encoding.** When `encoding` is not set, a file that decodes as UTF-8 (with or without a byte-order mark) is read as UTF-8; otherwise it is read as cp1252, then latin-1, with a warning. Pass `--encoding` / `encoding:` to choose.
+- **Infinite values.** `inf` / `-inf` in a numeric column are invalid values: validation reports them as type errors ("'inf' is not a finite number"), and detection and remediation treat them like other unparseable cells.
 
 ## Options per type
 
-**Files** (`csv`, `tsv`): `path`, `delimiter`, `has_header` (default `true`), `encoding` (`utf-8`), `compression` (`infer`), `read_options` (extra arguments for `pandas.read_csv`).
+**Files** (`csv`, `tsv`): `path`, `delimiter` (sniffed), `has_header` (default `true`), `encoding` (UTF-8 with cp1252/latin-1 fallback), `na_values` (extra tokens read as missing; default none), `decimal` (`.`, or `,` when detected), `compression` (`infer`), `read_options` (extra arguments for `pandas.read_csv`; a `na_values` entry there is added to the source's `na_values`).
 
 **JSON** (`json`, `jsonl`): `path`, `format` (`auto`, `json` or `jsonl`), `records_path` (dotted path to the list of records, for example `data.items`), `flatten` (default `true`), `encoding`.
 

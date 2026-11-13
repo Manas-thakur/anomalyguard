@@ -76,6 +76,8 @@ class Notifier(ABC):
 
     def __init__(self, min_severity: Severity | str = Severity.INFO):
         self.min_severity = Severity(min_severity)
+        #: why the last ``send`` failed (set by notifiers that can fail)
+        self.last_error: str | None = None
 
     def accepts(self, message: AlertMessage) -> bool:
         return message.severity >= self.min_severity

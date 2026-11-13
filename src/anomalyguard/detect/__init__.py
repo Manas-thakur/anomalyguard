@@ -24,6 +24,7 @@ from anomalyguard.detect.statistical import GrubbsDetector, IQRDetector, MADDete
 from anomalyguard.detect.timeseries import (
     CUSUMDetector,
     EWMADetector,
+    FlatlineDetector,
     RollingZScoreDetector,
     SeasonalResidualDetector,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "EWMADetector",
     "EnsembleDetector",
     "Finding",
+    "FlatlineDetector",
     "GroupedDetector",
     "GrubbsDetector",
     "IQRDetector",

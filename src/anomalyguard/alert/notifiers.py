@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import smtplib
 import sys
@@ -22,6 +23,8 @@ COLORS = {
     Severity.CRITICAL: "\033[97;41m",
 }
 RESET = "\033[0m"
+
+log = logging.getLogger("anomalyguard.alert")
 
 
 class ConsoleNotifier(Notifier):
@@ -103,12 +106,36 @@ class WebhookNotifier(Notifier):
         return message.to_dict()
 
     def send(self, message: AlertMessage) -> bool:
+        self.last_error = None
         try:
             with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
                 resp = client.post(self.url, json=self.payload(message), headers=self.headers)
-            return resp.is_success
-        except httpx.HTTPError:
-            return False
+        except httpx.HTTPError as exc:
+            return self._failed(message, f"{type(exc).__name__}: {exc}")
+        if not resp.is_success:
+            reason = resp.reason_phrase or ""
+            return self._failed(message, f"HTTP {resp.status_code} {reason}".strip())
+        return True
+
+    def _failed(self, message: AlertMessage, error: str) -> bool:
+        self.last_error = error
+        log.warning(
+            "%s alert delivery to %s failed: %s (alert: %s)",
+            self.kind,
+            _redact(self.url),
+            error,
+            message.title,
+        )
+        return False
+
+
+def _redact(url: str) -> str:
+    """Scheme and host only: webhook paths often contain the secret token."""
+    try:
+        u = httpx.URL(url)
+        return f"{u.scheme}://{u.host}{f':{u.port}' if u.port else ''}/..."
+    except Exception:
+        return "<webhook url>"
 
 
 SLACK_COLORS = {
@@ -193,6 +220,7 @@ class EmailNotifier(Notifier):
         return msg
 
     def send(self, message: AlertMessage) -> bool:
+        self.last_error = None
         try:
             with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
                 if self.use_tls:
@@ -202,7 +230,15 @@ class EmailNotifier(Notifier):
                     smtp.login(self.username, password)
                 smtp.send_message(self.build(message))
             return True
-        except (OSError, smtplib.SMTPException):
+        except (OSError, smtplib.SMTPException) as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning(
+                "email alert delivery via %s:%s failed: %s (alert: %s)",
+                self.host,
+                self.port,
+                self.last_error,
+                message.title,
+            )
             return False
 
 

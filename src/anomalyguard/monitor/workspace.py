@@ -185,7 +185,16 @@ def rebuild_report(n_rows: int, findings: list[dict[str, Any]], index: list[Any]
                 scores[f.row] = max(scores[f.row], f.score)
         cols = sorted({f.column for f in fs if f.column})
         results.append(DetectionResult(det, scores, scores, labels, 1.0, cols, fs))
-    return AnomalyReport(n_rows=n_rows, results=results, index=list(index), combine="any")
+    # grouped detectors are named "grouped(mad by region,channel)": remediation
+    # needs the group columns to cap within each group
+    groups = {}
+    for det in by_det:
+        m = re.fullmatch(r"grouped\(.+ by (.+)\)", det)
+        if m:
+            groups[det] = [c.strip() for c in m.group(1).split(",") if c.strip()]
+    return AnomalyReport(
+        n_rows=n_rows, results=results, index=list(index), combine="any", groups=groups
+    )
 
 
 # ----------------------------------------------------------------------
@@ -698,7 +707,7 @@ class Workspace:
         path = folder / "cleaned.csv"
         if not path.exists():
             return 0
-        df = pd.read_csv(path)
+        df = read_any(path, delimiter=",", encoding="utf-8")
         index = _read_json(folder / "cleaned_index.json")
         if index and len(index) == len(df):
             df.index = index

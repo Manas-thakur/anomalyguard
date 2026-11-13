@@ -23,6 +23,28 @@ def _sqlite_path(url: str) -> str | None:
     return None
 
 
+def _missing_table_message(url: str) -> str:
+    msg = "Reading a database needs a table: pass --table NAME (or `table:`/`query:` in the source config)"
+    path = _sqlite_path(url)
+    if path and path != ":memory:" and Path(path).exists():
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                names = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+                        " AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                    ).fetchall()
+                ]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            names = []
+        msg += f". Tables in {path}: {', '.join(names) if names else '(none)'}"
+    return msg
+
+
 class SQLSource(Source):
     """Read a table or query.
 
@@ -41,7 +63,7 @@ class SQLSource(Source):
         cursor: str | None = None,
     ):
         if not query and not table:
-            raise ValueError("SQLSource needs either 'query' or 'table'")
+            raise ValueError(_missing_table_message(str(url)))
         super().__init__(name or table or "sql", cursor)
         self.url = str(url)
         self.table = table
@@ -75,8 +97,10 @@ class SQLSource(Source):
         try:
             from sqlalchemy import create_engine, text
         except ImportError as exc:  # pragma: no cover - depends on extras
+            from anomalyguard.monitor.doctor import install_command
+
             raise IngestError(
-                "Non-SQLite databases need SQLAlchemy: pip install 'anomalyguard[sql]'"
+                f"Non-SQLite databases need SQLAlchemy: {install_command('sql')}"
             ) from exc
         engine = create_engine(self.url)
         try:

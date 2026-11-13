@@ -73,8 +73,10 @@ class ReviewQueue:
     ``apply`` writes approved values back into a DataFrame by index label.
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, create: bool = True):
         self.path = Path(path)
+        if not create and not self.path.is_file():
+            raise FileNotFoundError(f"Review database not found: {self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._conn()) as conn, conn:
             conn.executescript(SCHEMA)
@@ -146,21 +148,34 @@ class ReviewQueue:
             existing = self.find_pending(pipeline, d.get("index"), d.get("column"), d.get("value"))
             if existing is not None:
                 ids.append(existing)
+                if d.get("applied"):
+                    self._mark_auto_applied(existing, d.get("suggestion"))
                 continue
-            ids.append(
-                self.add(
-                    d.get("column"),
-                    d.get("value"),
-                    d.get("reason", ""),
-                    row_index=d.get("index"),
-                    pipeline=pipeline,
-                    run_id=run_id,
-                    suggestion=d.get("suggestion"),
-                    suggestion_confidence=d.get("suggestion_confidence"),
-                    detector=d.get("detector"),
-                )
+            item_id = self.add(
+                d.get("column"),
+                d.get("value"),
+                d.get("reason", ""),
+                row_index=d.get("index"),
+                pipeline=pipeline,
+                run_id=run_id,
+                suggestion=d.get("suggestion"),
+                suggestion_confidence=d.get("suggestion_confidence"),
+                detector=d.get("detector"),
             )
+            if d.get("applied"):
+                # the suggestion was already written to the output (LLM auto_apply)
+                self._mark_auto_applied(item_id, d.get("suggestion"))
+            ids.append(item_id)
         return ids
+
+    def _mark_auto_applied(self, item_id: int, value: Any) -> None:
+        now = _now()
+        with closing(self._conn()) as conn, conn:
+            conn.execute(
+                "UPDATE review_items SET status = 'applied', resolved_value = ?, resolved_at = ?,"
+                " applied_at = ?, reviewer_note = ? WHERE id = ?",
+                (_dump(value), now, now, "applied automatically (LLM suggestion)", item_id),
+            )
 
     @staticmethod
     def _row(r: sqlite3.Row) -> dict[str, Any]:
@@ -317,8 +332,16 @@ class ReviewQueue:
         if item is None:
             raise KeyError(f"Review item {item_id} not found")
         if value is None:
-            value = item["suggestion"] if item["suggestion"] is not None else item["value"]
-        return self._resolve(item_id, "approved", value, note)
+            if item["status"] in ("approved", "applied") and item["resolved_value"] is not None:
+                # approving again (e.g. a bulk approve) keeps the reviewer's value
+                value = item["resolved_value"]
+            else:
+                value = item["suggestion"] if item["suggestion"] is not None else item["value"]
+        if note is None:
+            note = item.get("reviewer_note")
+        unchanged = item["status"] == "applied" and value == item["resolved_value"]
+        status = "applied" if unchanged else "approved"
+        return self._resolve(item_id, status, value, note)
 
     def reject(self, item_id: int, note: str | None = None) -> dict[str, Any]:
         item = self.get(item_id)

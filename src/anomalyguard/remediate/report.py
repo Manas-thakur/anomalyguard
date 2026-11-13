@@ -72,6 +72,9 @@ class RemediationReport:
         return {
             "summary": self.summary(),
             "column_stats": self.column_stats(),
+            # the change list is capped; these say how many there are in total
+            "total_changes": len(r.changes),
+            "truncated": len(changes) < len(r.changes),
             "changes": [c.to_dict() for c in changes],
             "dropped": [
                 {"row": k, "index": _plain(r.original.index[k]), "reason": v}
@@ -113,6 +116,8 @@ class RemediationReport:
                 b, a = st["before"], st["after"]
 
                 def pair(key: str, b=b, a=a) -> str:
+                    if b.get(key) is None and a.get(key) is None:
+                        return "-"
                     return f"{fmt(b.get(key))} -> {fmt(a.get(key))}"
 
                 lines.append(
@@ -129,7 +134,7 @@ class RemediationReport:
             for c in self.result.changes[:max_rows]:
                 d = c.to_dict()
                 lines.append(
-                    f"| {d['index']} | {d['column']} | {fmt(d['before'])} | {fmt(d['after'])} | {d['strategy']} | {_md(d['reason'])} |"
+                    f"| {d['index']} | {d['column']} | {_show(d['before'])} | {_show(d['after'])} | {d['strategy']} | {_md(d['reason'])} |"
                 )
             if len(self.result.changes) > max_rows:
                 lines.append(f"\n... {len(self.result.changes) - max_rows} more changes")
@@ -149,10 +154,16 @@ class RemediationReport:
             for f in self.result.flagged[:max_rows]:
                 d = f.to_dict()
                 lines.append(
-                    f"| {d['index']} | {d['column'] or '-'} | {fmt(d['value'])} | {_md(d['reason'])} |"
+                    f"| {d['index']} | {d['column'] or '-'} | {_show(d['value']) if d['column'] else '-'} | {_md(d['reason'])} |"
                 )
             lines.append("")
         return "\n".join(lines)
+
+
+def _show(v: Any) -> str:
+    """A cell value for the report; missing cells are spelled out because "NA"
+    can be a real value (e.g. a region code)."""
+    return "(missing)" if v is None else _md(fmt(v))
 
 
 def _md(text: str) -> str:

@@ -232,6 +232,8 @@ export function SeverityDot({ severity, className }: { severity: Severity; class
 
 const STATUS_CLASS: Record<string, string> = {
   success: "bg-ok-soft text-ok border-ok/25",
+  sent: "bg-ok-soft text-ok border-ok/25",
+  partial: "bg-sev-medium-soft text-sev-medium border-sev-medium/25",
   approved: "bg-ok-soft text-ok border-ok/25",
   applied: "bg-accent text-accent-foreground border-primary/20",
   installed: "bg-ok-soft text-ok border-ok/25",

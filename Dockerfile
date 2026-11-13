@@ -2,6 +2,9 @@
 #   docker build -t anomalyguard .
 #   docker run --rm -p 8765:8765 -v "$PWD/.anomalyguard:/data/.anomalyguard" anomalyguard
 #   docker run --rm -v "$PWD:/data" anomalyguard detect examples/data/orders.csv
+# The /data/.anomalyguard volume keeps everything the server writes: the database,
+# uploads, analyses and pipelines created in the web app (/data/.anomalyguard/pipelines).
+# /data/pipelines (mount your own YAML there) and the bundled /data/examples are scanned too.
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="AnomalyGuard"       org.opencontainers.image.description="Data anomaly detection and remediation with a web app and REST API"       org.opencontainers.image.source="https://github.com/Manas-thakur/anomalyguard"       org.opencontainers.image.licenses="MIT"
@@ -9,7 +12,8 @@ LABEL org.opencontainers.image.title="AnomalyGuard"       org.opencontainers.ima
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    ANOMALYGUARD_PIPELINE_DIRS=/data/.anomalyguard/pipelines,/data/pipelines,/data/examples
 
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./

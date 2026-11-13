@@ -16,7 +16,41 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { download } from "@/lib/api";
 import { fmtInt, fmtMs, fmtPct, fmtTime, runLabel } from "@/lib/format";
 import { useRun, useRunIncidents } from "@/lib/queries";
-import type { RunDetail } from "@/lib/types";
+import type { AlertRow, RunDetail } from "@/lib/types";
+
+const ALERT_STATUS: Record<string, string> = {
+  sent: "Delivered",
+  partial: "Partly delivered",
+  failed: "Delivery failed",
+  duplicate: "Suppressed (duplicate)",
+  rate_limited: "Suppressed (rate limit)",
+  filtered: "No channel accepts this severity",
+};
+
+function AlertItem({ a }: { a: AlertRow }) {
+  const failures = (a.deliveries ?? []).filter((d) => !d.ok);
+  return (
+    <li className="space-y-1 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge status={a.severity || "info"} />
+        <span className="text-sm font-medium">{a.title}</span>
+      </div>
+      <p className="text-muted-foreground flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
+        <StatusBadge status={a.status}>{ALERT_STATUS[a.status] ?? a.status}</StatusBadge>
+        <span>{a.channels ? `via ${a.channels}` : "no channel delivered it"}</span> · <TimeAgo value={a.created_at} />
+      </p>
+      {failures.length ? (
+        <ul className="text-sev-high space-y-0.5 text-xs">
+          {failures.map((d, i) => (
+            <li key={`${d.channel}-${i}`}>
+              <span className="font-mono">{d.channel}</span>: {d.error || "delivery failed"}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
 
 function DownloadButton({ path, label }: { path: string; label: string }) {
   const [busy, setBusy] = useState(false);
@@ -71,21 +105,13 @@ function Details({ run }: { run: RunDetail }) {
             />
           )}
         </Section>
-        <Section title="Alerts sent" flush>
+        <Section title="Alerts" flush>
           {!run.alerts.length ? (
             <EmptyState icon={BellIcon} title="No alerts" description="No alert rule fired for this run." className="py-6" />
           ) : (
             <ul className="divide-y">
               {run.alerts.map((a) => (
-                <li key={a.id} className="space-y-1 px-4 py-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusBadge status={a.severity || "info"} />
-                    <span className="text-sm font-medium">{a.title}</span>
-                  </div>
-                  <p className="text-muted-foreground text-xs">
-                    {a.status} · {a.channels || "no channels"} · <TimeAgo value={a.created_at} />
-                  </p>
-                </li>
+                <AlertItem key={a.id} a={a} />
               ))}
             </ul>
           )}
@@ -154,7 +180,7 @@ export default function RunDetailPage() {
         description={
           run ? (
             <>
-              {run.kind === "analysis" ? "Analysis" : "Pipeline run"} started {fmtTime(run.started_at)}, took {fmtMs(run.duration_ms)}.
+              {run.kind === "analysis" ? "Analysis" : run.run_number ? `Pipeline run ${run.run_number} of ${runLabel(run.pipeline)},` : "Pipeline run"} started {fmtTime(run.started_at)}, took {fmtMs(run.duration_ms)}.
               {m?.source ? ` Source: ${String(m.source).split(/[\\/]/).pop()}` : ""}
             </>
           ) : (

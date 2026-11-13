@@ -7,18 +7,26 @@ AnomalyGuard needs **Python 3.10 or newer**. The core package depends on NumPy, 
 
 ## pip (from GitHub)
 
+AnomalyGuard is not on PyPI; pip installs it from GitHub. The commands below install the **v0.3.0** release:
+
 ```bash
 # library + CLI
-pip install "git+https://github.com/Manas-thakur/anomalyguard"
+pip install "anomalyguard @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 
 # with the web app, Parquet and SQLAlchemy support
-pip install "anomalyguard[server,parquet,sql] @ git+https://github.com/Manas-thakur/anomalyguard"
+pip install "anomalyguard[server,parquet,sql] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 
 # everything
-pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard"
+pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 ```
 
-To pin a release, add its tag: `git+https://github.com/Manas-thakur/anomalyguard@v0.3.0`. Each [GitHub Release](https://github.com/Manas-thakur/anomalyguard/releases) also has the sdist and wheel attached, which pip can install directly.
+For the latest unreleased code, use `@main` instead of the tag:
+
+```bash
+pip install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@main"
+```
+
+Each [GitHub Release](https://github.com/Manas-thakur/anomalyguard/releases) also has the sdist and wheel attached, which pip can install directly. Error messages about a missing extra (for example `serve` without the `server` extra) print the matching command for your installed version.
 
 Check the install:
 
@@ -45,10 +53,10 @@ anomalyguard doctor
 With [uv](https://docs.astral.sh/uv/) you can add AnomalyGuard to a project or run it as a tool:
 
 ```bash
-uv add "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard"
+uv add "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 
 # or run the CLI without adding it to a project
-uvx --from "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard" anomalyguard serve
+uvx --from "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0" anomalyguard serve
 ```
 
 ### Development setup
@@ -88,6 +96,6 @@ docker run --rm ghcr.io/manas-thakur/anomalyguard detect examples/data/orders.cs
 docker run --rm -v "$PWD:/data" ghcr.io/manas-thakur/anomalyguard run pipeline.yaml
 ```
 
-The release workflow tags images `X.Y.Z`, `X.Y` and `latest`. The container runs as an unprivileged user (uid 1000) and has a health check on `/health`. Mounting your own folder over `/data` hides the bundled `examples/`.
+The `/data/.anomalyguard` volume holds everything the server writes: the database, uploads, analyses and the pipelines you create in the web app (saved to `/data/.anomalyguard/pipelines`), so they survive a container restart. The release workflow tags images `X.Y.Z`, `X.Y` and `latest`. The container runs as an unprivileged user (uid 1000) and has a health check on `/health`. Mounting your own folder over `/data` hides the bundled `examples/`.
 
 See [Deployment](/anomalyguard/docs/guides/deployment/) for API keys, CORS and reverse proxies.

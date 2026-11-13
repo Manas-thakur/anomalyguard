@@ -26,7 +26,7 @@ By default pipelines write to the queue in the monitor database (`.anomalyguard/
 
 ### Applying decisions
 
-Approving records the value to use; it does not edit any file by itself.
+Approving records the value to use; it does not edit any file by itself. Approving an already-approved item again without a value (for example in a bulk approve) keeps the value the reviewer chose. Items that flag a whole row (no column, e.g. a multivariate anomaly) have no cell value: approving them records the decision, and `apply` leaves the data unchanged.
 
 - For items from a web app **analysis**, **Apply** writes approved values into that analysis's cleaned CSV and marks the items `applied`.
 - Items from **pipeline runs** stay `approved`. Write them into your data with `ReviewQueue.apply(df)`, which matches items by index label and column and returns the updated frame and the number of values written:
@@ -44,7 +44,7 @@ Feedback is a label on a finding: **false positive** (it was normal) or **true p
 
 - **Mark as normal** (false positive) or **Confirm** (true positive) on an incident;
 - **Mark as normal** (`m`) on a review item, which also rejects the item;
-- `anomalyguard feedback fp --anomaly-id N` / `feedback tp --anomaly-id N` (or `--detector NAME`);
+- `anomalyguard feedback fp --anomaly-id N` / `feedback tp --anomaly-id N` (or `--detector NAME`); `anomalyguard findings RUN_ID` lists the finding ids of a run, and unknown detector names are rejected;
 - `POST /api/feedback`.
 
 ### Tuning

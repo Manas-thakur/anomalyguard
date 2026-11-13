@@ -8,10 +8,54 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - Schema inference adds `max: now` to timestamp columns that are (almost) all in the past, so future timestamps are reported, and an email `pattern` to columns that hold email addresses, so malformed addresses are reported as "not a valid email address". `max: now` is evaluated at validation time.
+- `flatline` detector (aliases `stuck`, `stuck_at`): flags runs of identical consecutive values (a stuck sensor or frozen feed), with a run-length threshold learned from the data.
+- Incremental pipelines keep a reference window of earlier rows (`detection.reference_rows`, default 5,000, stored in the state folder): detectors are fitted on the reference rows plus the new batch and only the new rows are reported. A batch under 30 rows without reference rows gives a warning.
+- CLI: `--param DETECTOR.KEY=VALUE` (repeatable, YAML values) for `detect` and `fix`, so every detector parameter and the benchmark's best configurations are reachable from the command line (`-m ensemble --param ensemble.detectors=...`); `--group-by` takes several comma-separated columns.
+- CLI: `--delimiter`/`--sep`, `--encoding`, `--na-values` and `--decimal` for `profile`, `validate`, `detect` and `fix`; `fix --missing-value` (for `--missing constant`) and `fix --min/--max` (for `--outlier clip`); `detect --show-ids` lists every finding.
+- `detect` and `fix` apply thresholds tuned with `feedback tune` when the `--db` state database has them (named on stderr); `--no-tuned-thresholds` turns this off.
+- New `anomalyguard findings [RUN_ID]` lists stored finding ids for `feedback --anomaly-id`.
+- Runs show a per-pipeline run number next to the global id (`[orders] run 3 (#17)`) in the CLI, API (`run_number`) and web app.
+- The remediation JSON report has `total_changes` and `truncated`, so a change list cut at 1,000 entries is visible.
+
+### Changed
+- CSV files: only empty cells are read as missing. Text such as `NA` (North America), `N/A`, `null` or `None` stays a value everywhere CSVs are read (CLI, pipelines, uploads and cleaned files in the web app); opt in to extra tokens with `--na-values` or the source's `na_values`. A cell spelling `NaN` in a numeric column counts as missing.
+- CSV delimiters are sniffed when not given (`,` `;` TAB `|`), semicolon files with decimal commas are read with `decimal=","`, and files that are not UTF-8 are read as cp1252/latin-1 with a warning. Rows with more fields than the header no longer become a made-up index (the file is rejected, or the extra fields are dropped with a warning); a file that still parses to one column whose header contains another delimiter gives a warning.
+- Statistical detectors (`zscore`, `mad`, `iqr`, `grubbs`) score log-normal-like columns (positive, clearly right-skewed, close to symmetric on a log scale; not small counts or mixtures of differently scaled groups) on a log scale (`log_scale: auto`; opt out with `log_scale: false` or `--no-log-scale`). The benchmark results are unchanged. On clean log-normal data `mad` now flags 0.1% of rows instead of 6.8%, and `iqr` 2.2% instead of 10.2%. `cap` uses the same rule for its fences.
+- With a time column, time-series detectors run on a regular time grid: gaps in the timestamps become empty points (with a warning giving their number and size), so seasonal phases and rolling windows follow the clock instead of the row count.
+- Remediation is group-aware: with grouped detection (`--group-by`, `group_by:`) `cap` computes its fences per group from that group's unflagged values (column fences for groups under 8 values), and `median`/`mean` replacement uses the group's statistic, so a clean value is never pulled into another group's range.
+- `cap`: the lower fence of a never-negative column is at least 0, integer fences are rounded outward so boundary values are not nudged (quickstart: `quantity` 10 is no longer changed to 9), and flagged values already inside the fences are left unchanged and flagged.
+- When two steps change one cell (a type fix then an imputation, a cap then a schema clip), the report records one change with the original `before`, the final `after` and both strategies (`type_fix+impute_median`), and `cells_changed` counts the cell once. Cells flagged for review are not rewritten by later steps, so review items match the output.
+- Install instructions and missing-extra errors use the GitHub install command pinned to the release tag (`@v0.3.0`, or `@main` for the latest code) instead of a PyPI command.
+- The Docker image saves pipelines created in the web app under `/data/.anomalyguard/pipelines`, so the documented single volume keeps them.
 
 ### Fixed
 - `cap` no longer overwrites values far outside the expected range (more than three fence widths past it, e.g. a value typed ×100) or negative values in never-negative columns with a plausible-looking number; they are left unchanged and flagged for review. Capped values keep the column's decimal places.
 - Results and run pages: the tab bar and analysis steps no longer show stray scrollbars.
+- `fix` imputed the region code `NA` (read as missing) with the most common region, and `validate` reported `not_null` errors for it.
+- `validate` crashed on any `not_null` violation ("cannot convert float NaN to integer"), and `profile`/`detect` crashed on infinite values; `inf`/`-inf` are now reported as invalid values ("'inf' is not a finite number").
+- Very large whole numbers (above 2^53, e.g. 1e18 or 1e300) crashed type inference and coercion; such columns are typed as float.
+- A file read with the wrong delimiter silently produced made-up numbers from the extra fields.
+- `--invalid drop|flag|keep` turned off outlier fixing for the column; the parseable values are now fixed and the policy applies only to the unparseable cells.
+- `rolling_zscore` flagged normal readings after a stuck period because the window's spread was zero. A window whose scale falls below half the series' typical window scale now uses the typical scale: fewer false alarms, slightly lower recall (benchmark `sensor`, `window=6`: precision 0.18 -> 0.44, recall 0.19 -> 0.10).
+- `fix` flags dates outside the schema range (such as `max: now` future timestamps) for review instead of leaving them unreported.
+- Numeric dates such as `11/01/2026` are read in the day/month order that the column's unambiguous values allow (any `13/01/2026` means day-first), with a warning naming the choice; when a column mixes both orders, the ambiguous dates are treated as invalid.
+- `--missing mean|median|interpolate` silently left text and category gaps unfilled, and `mode`/`ffill`/`bfill`/`constant` filled identifier columns; such cells are now flagged with the reason. `missing: constant` without a value and `outlier: clip` without `min`/`max` are errors instead of no-ops.
+- LLM suggestions applied with `auto_apply` stayed pending in the review queue; they are queued as `applied`.
+- `--combine vote` with one detector or `--min-votes` above the number of detectors silently flagged nothing; it is now clamped with a warning.
+- `--time-column` with a missing column and `-m ""` were ignored; both are errors. `-m ensemble` without members explains how to give them.
+- Numpy `RuntimeWarning`s for all-missing or constant columns are no longer printed.
+- An empty (0-byte) CSV reported a 100% quality score; it is now an error ("file is empty"), as is a file without data rows. A SQLite file without `--table` lists its tables.
+- `demo generate -n 0` wrote 1,000 rows and `-n -5` failed with a numpy error; `-o x.xlsx` wrote CSV. Both are validated (rows at least 1; `.csv`, `.jsonl` or `.parquet`), and writing to an unsupported file type is an error.
+- CLI errors from a `KeyError` no longer print stray quotes; validation messages show `5`, not `np.int64(5)`; remediation reports show missing cells as `(missing)` rather than `NA`.
+- Pipeline files with a bad `schedule.every` or `schedule.interval_seconds` are rejected when loaded, with the file and field in the error; `run` reports it even without `--schedule`.
+- The Pipelines page, `GET /api/pipelines` and `doctor` list invalid pipeline files (YAML errors with line and column, missing name or source, bad schedule, unknown detector) with their error instead of hiding them or failing with 500; `doctor` keeps the file name and checks every file. A missing source file is shown as a warning.
+- Failed webhook, Slack and email deliveries are logged as warnings with the HTTP status or error, never the webhook token. Alerts record per-channel `deliveries`, `channels` lists only channels that delivered, and status is `sent`, `partial` or `failed`; the API and run page show each failed channel's error. Run metrics add `alerts_failed`, and `alerts_sent` counts alerts delivered on at least one channel.
+- `feedback --detector` and `PUT /api/thresholds/{name}` reject unknown detector names (aliases are stored under the canonical name; names like `grouped(mad by region)` are accepted).
+- Feedback `row_index` is no longer double-encoded in `/api/feedback`.
+- Approving an already-approved review item without a value keeps the reviewer's value; approving a whole-row item from the CLI explains there is no cell value to set.
+- `review`, `feedback` and `findings` error on a `--db` path that does not exist instead of creating it; `review list --status applied` is supported. With monitoring off the CLI no longer prints `run #None`.
+- Pipeline jobs started from the web app end with a summary message instead of "Running"; `/api/runs` items include `kind`; Markdown run reports are served as `text/markdown`; the mute error states the valid range.
+- Docs: the Python API review-queue example approves a cell item, so `apply` writes the value; the benchmark page has the current real results and the CLI commands that reproduce the best configurations.
 
 ## [0.3.0] - 2026-11-13
 

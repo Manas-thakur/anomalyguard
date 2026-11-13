@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -11,6 +12,8 @@ from typing import Any
 
 from anomalyguard.alert.base import AlertMessage, Notifier
 from anomalyguard.alert.rules import AlertRule
+
+log = logging.getLogger("anomalyguard.alert")
 
 
 class RateLimiter:
@@ -63,12 +66,30 @@ class RateLimiter:
 
 @dataclass
 class DispatchRecord:
+    """What happened to one alert.
+
+    ``status``: ``sent`` (every channel delivered), ``partial`` (some did),
+    ``failed`` (none did), or ``duplicate`` / ``rate_limited`` / ``filtered``
+    (not attempted). ``channels`` lists the channels that delivered it;
+    ``deliveries`` has one ``{channel, ok, error}`` entry per attempted channel.
+    """
+
     message: AlertMessage
-    status: str  # sent | duplicate | rate_limited | failed | filtered
+    status: str  # sent | partial | failed | duplicate | rate_limited | filtered
     channels: list[str] = field(default_factory=list)
+    deliveries: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def delivered(self) -> bool:
+        return self.status in ("sent", "partial")
 
     def to_dict(self) -> dict[str, Any]:
-        return {**self.message.to_dict(), "status": self.status, "channels": self.channels}
+        return {
+            **self.message.to_dict(),
+            "status": self.status,
+            "channels": self.channels,
+            "deliveries": self.deliveries,
+        }
 
 
 class AlertManager:
@@ -102,9 +123,30 @@ class AlertManager:
                 if not ok:
                     records.append(DispatchRecord(msg, why))
                     continue
-            delivered = [n.kind for n in targets if n.send(msg)]
-            records.append(DispatchRecord(msg, "sent" if delivered else "failed", delivered))
+            deliveries = [_deliver(n, msg) for n in targets]
+            delivered = [d["channel"] for d in deliveries if d["ok"]]
+            if len(delivered) == len(deliveries):
+                status = "sent"
+            elif delivered:
+                status = "partial"
+            else:
+                status = "failed"
+            records.append(DispatchRecord(msg, status, delivered, deliveries))
         return records
 
     def process(self, metrics: dict[str, Any], source: str | None = None) -> list[DispatchRecord]:
         return self.dispatch(self.evaluate(metrics, source))
+
+
+def _deliver(notifier: Notifier, message: AlertMessage) -> dict[str, Any]:
+    """Send through one channel; a notifier that raises counts as a failed delivery."""
+    try:
+        ok = bool(notifier.send(message))
+        error = None if ok else getattr(notifier, "last_error", None)
+        if not ok and not error:  # built-in notifiers log their own failures with details
+            error = "delivery failed"
+            log.warning("%s alert delivery failed (alert: %s)", notifier.kind, message.title)
+    except Exception as exc:  # one broken channel must not stop the others
+        ok, error = False, f"{type(exc).__name__}: {exc}"
+        log.warning("%s alert delivery failed: %s (alert: %s)", notifier.kind, error, message.title)
+    return {"channel": notifier.kind, "ok": ok, "error": error}

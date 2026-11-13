@@ -21,13 +21,28 @@ def pipeline_id(path: Path) -> str:
     return hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
 
 
+PIPELINE_HINT_KEYS = {"name", "source", "detectors", "schedule", "sink", "remediation"}
+
+
 def looks_like_pipeline(path: Path) -> bool:
-    """A YAML mapping with ``name`` and ``source`` (schema files have ``fields``)."""
+    """Whether a YAML file in a pipeline folder should be listed as a pipeline.
+
+    Valid pipelines and broken attempts at one are listed (a file that does not
+    parse, or a mapping with pipeline keys such as ``name`` or ``source``), so
+    mistakes show up as invalid instead of disappearing. Schema files (with a
+    ``fields`` key) and other YAML documents are left out.
+    """
     try:
         data = yaml.safe_load(expand_env(path.read_text(encoding="utf-8")))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError):
         return False
-    return isinstance(data, dict) and "source" in data and "name" in data
+    except yaml.YAMLError:
+        return True  # a pipeline with a syntax error: list it as invalid
+    if not isinstance(data, dict):
+        return False
+    if "fields" in data and "source" not in data:
+        return False  # a schema file
+    return bool(PIPELINE_HINT_KEYS & set(data))
 
 
 class PipelineCatalog:
@@ -69,18 +84,19 @@ class PipelineCatalog:
             "valid": True,
             "error": None,
         }
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            info.update(valid=False, error=f"cannot read file: {exc}", name=None)
+            return info
         if with_yaml:
             info["yaml"] = text
         try:
-            cfg = PipelineConfig.load(path)
-        except (ConfigError, OSError) as exc:
-            info.update(valid=False, error=str(exc))
-            try:
-                data = yaml.safe_load(text) or {}
-                info["name"] = data.get("name") if isinstance(data, dict) else None
-            except yaml.YAMLError:
-                info["name"] = None
+            # from_yaml (not load) so the error does not repeat the file name
+            cfg = PipelineConfig.from_yaml(text, base_dir=path.resolve().parent)
+        except Exception as exc:  # listing must never fail because of one file
+            error = str(exc) if isinstance(exc, ConfigError) else f"{type(exc).__name__}: {exc}"
+            info.update(valid=False, error=error, name=_name_of(text))
             return info
         info.update(
             name=cfg.name,
@@ -90,8 +106,12 @@ class PipelineCatalog:
             remediation=cfg.remediation is not None,
             schedule=cfg.schedule,
             interval_seconds=cfg.interval_seconds,
-            notifiers=[n.get("type", "console") for n in (cfg.alerts or {}).get("notifiers", [])],
+            notifiers=[
+                str(n.get("type", "console")) if isinstance(n, dict) else str(n)
+                for n in (cfg.alerts or {}).get("notifiers", []) or []
+            ],
         )
+        info["warnings"] = _warnings(cfg)
         if self.store is not None:
             last = self.store.runs(limit=1, pipeline=cfg.name)
             info["last_run"] = last[0] if last else None
@@ -118,13 +138,7 @@ class PipelineCatalog:
             return {"valid": False, "error": str(exc)}
         except Exception as exc:  # anything else yaml/config related
             return {"valid": False, "error": f"{type(exc).__name__}: {exc}"}
-        warnings = []
-        src = cfg.source.get("path")
-        if src and "://" not in str(src):
-            resolved = cfg.resolve(src)
-            if resolved is not None and not resolved.exists():
-                warnings.append(f"source file not found: {resolved}")
-        return {"valid": True, "error": None, "name": cfg.name, "warnings": warnings}
+        return {"valid": True, "error": None, "name": cfg.name, "warnings": _warnings(cfg)}
 
     def create(
         self,
@@ -189,6 +203,25 @@ def templates() -> list[dict[str, Any]]:
         }
         for t in TEMPLATES
     ]
+
+
+def _warnings(cfg: PipelineConfig) -> list[str]:
+    warnings = []
+    src = cfg.source.get("path")
+    if src and "://" not in str(src):
+        resolved = cfg.resolve(src)
+        if resolved is not None and not resolved.exists():
+            warnings.append(f"source file not found: {resolved}")
+    return warnings
+
+
+def _name_of(text: str) -> str | None:
+    try:
+        data = yaml.safe_load(expand_env(text))
+    except yaml.YAMLError:
+        return None
+    name = data.get("name") if isinstance(data, dict) else None
+    return str(name) if name else None
 
 
 def _source_label(cfg: PipelineConfig) -> str:

@@ -153,12 +153,30 @@ def _severity_sql(level: str) -> str:
     }[level]
 
 
+# columns added after 0.3.0; created on open for older databases
+MIGRATIONS = {
+    ("alerts", "deliveries"): "ALTER TABLE alerts ADD COLUMN deliveries TEXT",
+}
+
+# per-pipeline run sequence: 1 for a pipeline's first run, 2 for its second, ...
+RUN_NUMBER_SQL = (
+    "(SELECT COUNT(*) FROM runs r2 WHERE r2.pipeline = runs.pipeline AND r2.id <= runs.id)"
+    " AS run_number"
+)
+
+
 class MetricsStore:
-    def __init__(self, path: str | Path = DEFAULT_DB):
+    def __init__(self, path: str | Path = DEFAULT_DB, create: bool = True):
         self.path = Path(path)
+        if not create and not self.path.is_file():
+            raise FileNotFoundError(f"Database not found: {self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._conn()) as conn, conn:
             conn.executescript(SCHEMA)
+            for (table, col), ddl in MIGRATIONS.items():
+                have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if col not in have:
+                    conn.execute(ddl)
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
@@ -252,7 +270,9 @@ class MetricsStore:
         since: str | None = None,
     ) -> list[dict[str, Any]]:
         where, params = self._runs_where(pipeline, status, kind, q, since)
-        sql = f"SELECT * FROM runs WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?"
+        sql = (
+            f"SELECT *, {RUN_NUMBER_SQL} FROM runs WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?"
+        )
         with closing(self._conn()) as conn:
             return [
                 self._run_row(r)
@@ -301,9 +321,19 @@ class MetricsStore:
             rows = [dict(r) for r in conn.execute(sql, [*params, int(limit)]).fetchall()]
         return rows[::-1]
 
+    def run_number(self, run_id: int) -> int | None:
+        """This run's position in its pipeline's history (1 = first run)."""
+        with closing(self._conn()) as conn:
+            r = conn.execute(
+                f"SELECT {RUN_NUMBER_SQL} FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return int(r[0]) if r else None
+
     def get_run(self, run_id: int) -> dict[str, Any] | None:
         with closing(self._conn()) as conn:
-            r = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            r = conn.execute(
+                f"SELECT *, {RUN_NUMBER_SQL} FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
         if r is None:
             return None
         d = self._run_row(r)
@@ -503,17 +533,31 @@ class MetricsStore:
     def get_anomaly(self, anomaly_id: int) -> dict[str, Any] | None:
         with closing(self._conn()) as conn:
             r = conn.execute("SELECT * FROM anomalies WHERE id = ?", (anomaly_id,)).fetchone()
-        if r is None:
-            return None
-        d = dict(r)
-        d["column"] = d.pop("column_name")
-        return d
+        return self._anomaly_row(r) if r is not None else None
+
+    def detector_names(self) -> set[str]:
+        """Detector names recorded by runs, feedback or tuned thresholds."""
+        with closing(self._conn()) as conn:
+            rows = conn.execute(
+                "SELECT detector FROM anomalies UNION SELECT detector FROM feedback"
+                " UNION SELECT detector FROM thresholds"
+            ).fetchall()
+            names = {r[0] for r in rows if r[0]}
+            for (dj,) in conn.execute(
+                "SELECT DISTINCT detectors_json FROM runs WHERE detectors_json IS NOT NULL"
+            ).fetchall():
+                try:
+                    names.update(json.loads(dj or "{}"))
+                except (TypeError, ValueError):
+                    pass
+        return names
 
     # -- alerts ---------------------------------------------------------
     def add_alerts(self, run_id: int | None, records: list[dict[str, Any]]) -> None:
         with closing(self._conn()) as conn, conn:
             conn.executemany(
-                "INSERT INTO alerts (run_id, created_at, severity, title, status, channels) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO alerts (run_id, created_at, severity, title, status, channels, deliveries)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         run_id,
@@ -522,6 +566,7 @@ class MetricsStore:
                         r.get("title"),
                         r.get("status"),
                         ",".join(r.get("channels") or []),
+                        json.dumps(r.get("deliveries") or [], default=str),
                     )
                     for r in records
                 ],
@@ -535,7 +580,16 @@ class MetricsStore:
         q += " ORDER BY a.id DESC LIMIT ?"
         params.append(int(limit))
         with closing(self._conn()) as conn:
-            return [dict(r) for r in conn.execute(q, params).fetchall()]
+            return [self._alert_row(r) for r in conn.execute(q, params).fetchall()]
+
+    @staticmethod
+    def _alert_row(r: sqlite3.Row) -> dict[str, Any]:
+        d = dict(r)
+        try:
+            d["deliveries"] = json.loads(d.get("deliveries") or "[]")
+        except (TypeError, ValueError):
+            d["deliveries"] = []
+        return d
 
     # -- feedback & thresholds -----------------------------------------
     def add_feedback(
@@ -582,12 +636,16 @@ class MetricsStore:
 
     def feedback(self, limit: int = 100) -> list[dict[str, Any]]:
         with closing(self._conn()) as conn:
-            return [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (limit,)
-                ).fetchall()
-            ]
+            rows = conn.execute("SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (limit,))
+            out = []
+            for r in rows.fetchall():
+                d = dict(r)
+                try:  # stored as JSON so 7 and "7" stay distinct
+                    d["row_index"] = json.loads(d["row_index"]) if d["row_index"] else None
+                except (TypeError, ValueError):
+                    pass
+                out.append(d)
+            return out
 
     def thresholds(self) -> dict[str, float]:
         with closing(self._conn()) as conn:

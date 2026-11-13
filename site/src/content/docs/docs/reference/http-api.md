@@ -37,11 +37,11 @@ curl -H "X-API-Key: $ANOMALYGUARD_API_KEY" "http://127.0.0.1:8765/api/runs?limit
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/runs` | Run history, newest first. Query: `limit` (1-1000, default 100), `offset`, `pipeline`, `status` (`success`, `failed`, `empty`, ...), `kind` (`analysis` or `pipeline`), `q` (text search). `X-Total-Count` |
+| GET | `/api/runs` | Run history, newest first. Query: `limit` (1-1000, default 100), `offset`, `pipeline`, `status` (`success`, `failed`, `empty`, ...), `kind` (`analysis` or `pipeline`), `q` (text search). Each item has `kind` and `run_number` (the pipeline's own run sequence; `id` is global). `X-Total-Count` |
 | GET | `/api/runs/{run_id}` | One run with its metrics, `breakdown` (findings by column and detector), `alerts`, `artifacts` (downloadable file names), `kind` and its number of review items (`review`) |
 | GET | `/api/runs/{run_id}/anomalies` | Stored findings. Query: `limit` (1-5000, default 200), `offset`, `column`, `detector`, `severity` (`high`, `medium`, `low`), `q`, `sort` (`score`, `row`, `column`, `detector`, `id`; default `score`), `order` (`asc`, `desc`; default `desc`). `X-Total-Count` |
-| GET | `/api/runs/{run_id}/artifacts/{name}` | Download a run output (cleaned data, reports, anomalies) by a name from `artifacts` |
-| GET | `/api/alerts` | Recent alerts. Query: `limit` (1-1000, default 100), `run_id` |
+| GET | `/api/runs/{run_id}/artifacts/{name}` | Download a run output (cleaned data, reports, anomalies) by a name from `artifacts`. Markdown reports are served as `text/markdown`, CSV as `text/csv`, JSON as `application/json` |
+| GET | `/api/alerts` | Recent alerts. Query: `limit` (1-1000, default 100), `run_id`. Each alert has `status` (`sent`, `partial`, `failed`, `duplicate`, `rate_limited`, `filtered`), `channels` (the channels that delivered it) and `deliveries` (`[{"channel", "ok", "error"}]`, one per channel tried) |
 | GET | `/api/metrics/series` | Run metrics over time grouped per pipeline: `{"since", "series": [{"pipeline", "points": [...]}]}`. Query: `pipeline`, `days` (up to 3650), `kind` (`analysis` or `pipeline`) |
 
 ## Incidents
@@ -144,11 +144,11 @@ Jobs are stored in the database; jobs that were queued or running when the serve
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/feedback` | Record feedback. Body `{"label": "false_positive" \| "true_positive", "anomaly_id": N}`, or `detector` (with optional `run_id`, `row_index`, `column`) instead of `anomaly_id`; optional `note`. Default label `false_positive` |
-| GET | `/api/feedback` | `{"precision": {detector: {...}}, "recent": [...]}` |
+| POST | `/api/feedback` | Record feedback. Body `{"label": "false_positive" \| "true_positive", "anomaly_id": N}`, or `detector` (with optional `run_id`, `row_index`, `column`) instead of `anomaly_id`; optional `note`. Default label `false_positive`. An unknown `anomaly_id` or detector name is `404` |
+| GET | `/api/feedback` | `{"precision": {detector: {...}}, "recent": [...]}`; each recent item's `row_index` is the row label as stored (e.g. `1969`, not `"1969"`) |
 | POST | `/api/feedback/tune` | Adjust multipliers from feedback since the last tune. Returns `{"changes", "thresholds"}` |
 | GET | `/api/thresholds` | Multiplier per detector, with the reason and time of the last change |
-| PUT | `/api/thresholds/{detector}` | Body `{"multiplier": 1.3, "reason": "..."}` (0.1 to 10) |
+| PUT | `/api/thresholds/{detector}` | Body `{"multiplier": 1.3, "reason": "..."}` (0.1 to 10). The detector must be a registry name or alias (aliases are stored under the canonical name), `grouped`/`ensemble`, a composite name such as `grouped(mad by region)`, or a name a run recorded; otherwise `404` |
 | DELETE | `/api/thresholds/{detector}` | Reset to 1.0 |
 
 ## Pipelines

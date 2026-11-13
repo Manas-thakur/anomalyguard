@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from anomalyguard import __version__
 from anomalyguard.monitor import doctor
 from anomalyguard.monitor.catalog import PipelineCatalog, templates
-from anomalyguard.monitor.feedback import FeedbackLoop
+from anomalyguard.monitor.feedback import FeedbackLoop, resolve_detector
 from anomalyguard.monitor.incidents import IncidentEngine
 from anomalyguard.monitor.incidents import _num as number
 from anomalyguard.monitor.jobs import JobManager
@@ -69,6 +69,32 @@ MISSING_BUILD_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-
 <h1>AnomalyGuard</h1><p>The web app has not been built. Run <code>pnpm install</code> and
 <code>pnpm build</code> in <code>web/</code>, or install a released package. The REST API
 is available at <a href="/api/docs">/api/docs</a>.</p></body></html>"""
+
+
+TEXT_MEDIA_TYPES = {
+    ".md": "text/markdown; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".jsonl": "application/x-ndjson",
+    ".json": "application/json",
+    ".txt": "text/plain; charset=utf-8",
+    ".yaml": "text/yaml; charset=utf-8",
+    ".yml": "text/yaml; charset=utf-8",
+}
+
+
+def _media_type(path: Path) -> str | None:
+    """Content type for a run artifact (None lets Starlette guess)."""
+    return TEXT_MEDIA_TYPES.get(path.suffix.lower())
+
+
+def _run_label(result: Any) -> str:
+    """``run 3 (#17)``: the pipeline's own run number and the global run id."""
+    label = f"run {result.run_number}" if result.run_number else "run"
+    return f"{label} (#{result.run_id})" if result.run_id is not None else label
+
+
+def _run_kind(run: dict[str, Any]) -> str:
+    return "analysis" if str(run.get("pipeline") or "").startswith(ANALYSIS_PREFIX) else "pipeline"
 
 
 def dashboard_html() -> str:
@@ -270,7 +296,10 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
     ) -> list[dict[str, Any]]:
         """Run history, newest first. The total match count is in ``X-Total-Count``."""
         _total(response, store.count_runs(pipeline, status, kind, q))
-        return store.runs(limit, pipeline, status, kind, q, offset)
+        return [
+            {**r, "kind": _run_kind(r)}
+            for r in store.runs(limit, pipeline, status, kind, q, offset)
+        ]
 
     def _run_or_404(run_id: int) -> dict[str, Any]:
         r = store.get_run(run_id)
@@ -301,7 +330,7 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
         r["breakdown"] = store.anomaly_breakdown(run_id)
         r["alerts"] = store.alerts(limit=100, run_id=run_id)
         r["artifacts"] = sorted(_run_artifacts(r))
-        r["kind"] = "analysis" if r["pipeline"].startswith(ANALYSIS_PREFIX) else "pipeline"
+        r["kind"] = _run_kind(r)
         r["review"] = queue.query(status=None, run_id=run_id, limit=1)[1]
         return r
 
@@ -337,7 +366,7 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
         if name not in arts:
             raise HTTPException(404, f"artifact '{name}' not found for run {run_id}")
         path = arts[name]
-        return FileResponse(path, filename=f"run{run_id}_{path.name}")
+        return FileResponse(path, filename=f"run{run_id}_{path.name}", media_type=_media_type(path))
 
     @app.get("/api/alerts")
     def alerts(
@@ -473,7 +502,7 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, "hours must be a number") from exc
         if not 0 < hours <= 24 * 30:
-            raise HTTPException(422, "hours must be between 0 and 720")
+            raise HTTPException(422, "hours must be more than 0 and at most 720 (30 days)")
         return incidents.mute(run_id, inc_id, hours, (payload or {}).get("note"))
 
     # -- review queue -----------------------------------------------------------
@@ -694,7 +723,7 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
                 note=payload.get("note"),
             )
         except KeyError as exc:
-            raise HTTPException(404, str(exc)) from exc
+            raise HTTPException(404, exc.args[0] if exc.args else str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         return {"id": fid, "label": label}
@@ -719,6 +748,10 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
             raise HTTPException(422, "multiplier must be a number") from exc
         if not 0.1 <= mult <= 10:
             raise HTTPException(422, "multiplier must be between 0.1 and 10")
+        try:
+            detector = resolve_detector(detector, store)
+        except KeyError as exc:
+            raise HTTPException(404, exc.args[0]) from exc
         store.set_threshold(detector, round(mult, 4), payload.get("reason") or "set in the UI")
         return {"detector": detector, "multiplier": round(mult, 4)}
 
@@ -987,7 +1020,15 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
             ctx.progress(0.1, "Running")
             result = PipelineExecutor(cfg, console=False).run()
             if result.status == "failed":
-                raise RuntimeError(f"run #{result.run_id} failed: {result.error}")
+                raise RuntimeError(f"{_run_label(result)} failed: {result.error}")
+            m = result.metrics
+            ctx.progress(
+                1.0,
+                f"{_run_label(result)}: no new data"
+                if result.status == "empty"
+                else f"{_run_label(result)}: {m.get('rows', 0)} rows, "
+                f"{m.get('n_anomalies', 0)} anomalies",
+            )
             return result.to_dict()
 
         params = {"id": pid, "pipeline": cfg.name, "file": str(path)}

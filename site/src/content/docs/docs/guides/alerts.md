@@ -110,6 +110,14 @@ Keep secrets out of pipeline files:
 A webhook or Slack notifier with an empty URL is a configuration error, and the whole run fails. If `${SLACK_WEBHOOK_URL}` is not set, the URL is empty. Comment the notifier out (as the examples do) or use `${SLACK_WEBHOOK_URL:-...}` until the variable is set. `anomalyguard doctor` reports notifiers whose secrets are missing.
 :::
 
+## Failed deliveries
+
+A webhook, Slack or email notifier that cannot deliver (an HTTP error status, a refused connection, an SMTP error) does not fail the run. Instead:
+
+- a warning is logged on the `anomalyguard.alert` logger (printed by the CLI), naming the channel, the host (webhook paths, which often contain the token, are not logged) and the reason, e.g. `webhook alert delivery to https://hooks.example.com/... failed: HTTP 500 Internal Server Error`;
+- the alert's status becomes `partial` (some channels delivered it) or `failed` (none did), and its record lists every channel with `ok` and `error`;
+- the run's `alerts_sent` metric counts alerts delivered on at least one channel, and `alerts_failed` counts alerts with at least one failed channel; `anomalyguard run` prints `N alerts (M with failed deliveries)`.
+
 ## Checking the setup
 
 ```bash
@@ -129,7 +137,8 @@ manager = AlertManager(
     rate_limiter=RateLimiter(max_per_window=20, dedup_seconds=3600),
 )
 records = manager.process({"anomaly_rate": 0.047, "rows": 1000}, source="orders")
-print([r.status for r in records])   # ['sent']
+print([r.status for r in records])   # ['sent'], or 'partial' / 'failed' if a channel failed
+print(records[0].deliveries)         # [{'channel': 'console', 'ok': True, 'error': None}, ...]
 ```
 
 `create_notifier(dict)` builds a notifier from the same mapping as the YAML.

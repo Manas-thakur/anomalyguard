@@ -1,6 +1,8 @@
-"""Time-series detectors. Rows are assumed to be in time order (sort first, or
-pass ``time_column`` via the runner). These detectors score each value relative
-to its own history, so they are fit and scored on the same series."""
+"""Time-series detectors. Rows are assumed to be in time order and evenly
+spaced: pass ``time_column`` via the runner, which sorts by time and puts the
+series on a regular grid (missing points become empty values). These
+detectors score each value relative to its own history, so they are fit and
+scored on the same series."""
 
 from __future__ import annotations
 
@@ -10,6 +12,9 @@ import pandas as pd
 from anomalyguard.detect.base import Detector, fmt
 
 _EPS = 1e-12
+#: rolling windows whose scale is below this share of the typical window scale
+#: have collapsed (e.g. a stuck sensor) and are scored with the typical scale
+COLLAPSED = 0.5
 
 
 def _robust_z(x: np.ndarray) -> tuple[np.ndarray, float, float]:
@@ -25,9 +30,14 @@ class RollingZScoreDetector(Detector):
 
     With ``robust=True`` (default) the window centre is the rolling median and
     the scale is the rolling IQR / 1.349, so earlier spikes do not mask later ones.
+    A window whose scale collapses below half the series' typical window
+    scale (e.g. a stuck sensor repeating one value) is given the typical scale,
+    so the readings after a stuck period are not flagged just because the window
+    had no spread; use the ``flatline`` detector to catch the stuck run itself.
     """
 
     name = "rolling_zscore"
+    temporal = True
     default_threshold = 4.0
     description = "Deviation from a trailing rolling window (median/IQR or mean/std)."
 
@@ -52,8 +62,13 @@ class RollingZScoreDetector(Detector):
             else:
                 center = hist.mean()
                 scale = hist.std()
+            positive = scale[scale > 0]
+            typical = float(positive.median()) if len(positive) else 0.0
             floor = max(0.01 * float(self.global_scale_[j] or 0.0), _EPS)
-            scale = scale.clip(lower=floor)
+            # A window whose spread collapsed (e.g. a stuck sensor repeating one
+            # value) says nothing about normal variation: use the typical scale.
+            collapsed = scale < max(COLLAPSED * typical, floor)
+            scale = scale.where(~collapsed, max(typical, floor))
             z = ((s - center).abs() / scale).to_numpy()
             out[:, j] = np.where(np.isfinite(z), z, 0.0)
             out[np.isnan(X[:, j]), j] = np.nan
@@ -77,6 +92,7 @@ class EWMADetector(Detector):
     updating the state so a spike does not poison the baseline."""
 
     name = "ewma"
+    temporal = True
     default_threshold = 4.0
     description = "Residual from an exponentially weighted moving average forecast."
 
@@ -163,6 +179,7 @@ class SeasonalResidualDetector(Detector):
     position in the cycle (e.g. a daytime peak value at 3am)."""
 
     name = "seasonal"
+    temporal = True
     default_threshold = 4.0
     description = "Robust z-score of residuals after removing trend and seasonality."
 
@@ -214,6 +231,7 @@ class CUSUMDetector(Detector):
     """
 
     name = "cusum"
+    temporal = True
     default_threshold = 5.0
     description = "CUSUM change-point detection for sustained level shifts and drift."
 
@@ -277,3 +295,80 @@ class CUSUMDetector(Detector):
 
     def get_params(self):
         return {**super().get_params(), "k": self.k, "period": self.period}
+
+
+def runs(x: np.ndarray, tolerance: float = 0.0) -> list[tuple[int, int]]:
+    """``(start, length)`` of every run of equal consecutive values (missing
+    values break runs; values within ``tolerance`` of the run's first value
+    count as equal)."""
+    out = []
+    n = len(x)
+    i = 0
+    while i < n:
+        if not np.isfinite(x[i]):
+            i += 1
+            continue
+        j = i + 1
+        while j < n and np.isfinite(x[j]) and abs(x[j] - x[i]) <= tolerance:
+            j += 1
+        out.append((i, j - i))
+        i = j
+    return out
+
+
+def run_lengths(x: np.ndarray, tolerance: float = 0.0) -> np.ndarray:
+    """Length of the run of equal consecutive values each point belongs to
+    (0 for missing values)."""
+    out = np.zeros(len(x), dtype=float)
+    for start, length in runs(x, tolerance):
+        out[start : start + length] = length
+    return out
+
+
+class FlatlineDetector(Detector):
+    """Stuck-at / flat-line detection: runs of identical consecutive values.
+
+    The raw score of a point is the length of the run of equal values it
+    belongs to; a run is flagged when it is longer than the threshold. By
+    default the threshold is learned from the series: three times the 95th
+    percentile of its run lengths, and at least ``min_run`` (5) points, so
+    columns that legitimately repeat values (counts, rounded readings) are not
+    flagged. Set ``threshold`` to a fixed run length (in points) to override.
+    """
+
+    name = "flatline"
+    temporal = True
+    default_threshold = 5.0
+    description = "Runs of identical consecutive values (stuck sensor, frozen feed)."
+
+    def __init__(self, min_run: int = 5, tolerance: float = 0.0, **kw):
+        super().__init__(**kw)
+        self.min_run = int(min_run)
+        self.tolerance = float(tolerance)
+
+    def _fit(self, X: np.ndarray) -> None:
+        typical = []
+        for j in range(X.shape[1]):
+            lengths = [length for _, length in runs(X[:, j], self.tolerance)]
+            if lengths:
+                typical.append(float(np.percentile(lengths, 95)))
+        self.auto_threshold_ = max(float(self.min_run), 3.0 * max(typical, default=1.0))
+
+    def _auto_threshold(self, train_scores: np.ndarray) -> float:
+        return self.auto_threshold_
+
+    def _score_matrix(self, X: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(X, dtype=float)
+        for j in range(X.shape[1]):
+            out[:, j] = run_lengths(X[:, j], self.tolerance)
+        out[np.isnan(X)] = np.nan
+        return out
+
+    def _explain(self, X, row, col, raw):
+        return (
+            f"{self.columns_[col]}={fmt(X[row, col])} repeated for {int(raw)} consecutive points "
+            f"(flat line; runs longer than {fmt(self.effective_threshold)} are flagged)"
+        )
+
+    def get_params(self):
+        return {**super().get_params(), "min_run": self.min_run, "tolerance": self.tolerance}

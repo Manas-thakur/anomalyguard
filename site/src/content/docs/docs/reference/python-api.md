@@ -108,19 +108,22 @@ queue = ReviewQueue("review.db")                        # any SQLite file; creat
 ids = queue.add_flagged(result.flagged, pipeline="orders")
 print(queue.counts())                                   # {'pending': ..., 'approved': 0, ...}
 
-item = queue.list(status="pending", limit=1)[0]
+# a cell item (whole-row items have column None and nothing to write)
+item = next(i for i in queue.list(status="pending", pipeline="orders") if i["column"] is not None)
 queue.approve(item["id"], value=42, note="checked")     # or queue.reject(item["id"])
 fixed, n = queue.apply(result.data, pipeline="orders", mark=True)
+print(n, fixed.loc[item["row_index"], item["column"]])  # 1 42
 ```
 
 | Method | Meaning |
 |---|---|
+| `ReviewQueue(path, create=True)` | Open (and with `create=True`, create) the SQLite queue; `create=False` raises `FileNotFoundError` for a missing file |
 | `add_flagged(flagged, pipeline=None, run_id=None)` | Queue `FlaggedItem`s or dicts; already-pending duplicates are reused. Returns ids |
 | `add(column, value, reason, row_index=None, pipeline=None, run_id=None, suggestion=None, ...)` | Queue one item |
 | `list(status="pending", limit=..., pipeline=None)` | Items as dicts (`id`, `status`, `pipeline`, `run_id`, `row_index`, `column`, `value`, `reason`, `suggestion`, `resolved_value`, ...) |
 | `query(...)` / `ids(...)` / `facets(status)` | Filtered, paged queries (as the web app uses) |
 | `get(id)` / `counts()` | One item / counts per status |
-| `approve(id, value=None, note=None)` | Value to use: `value`, else the suggestion, else the original |
+| `approve(id, value=None, note=None)` | Value to use: `value`, else the value already approved (approving again keeps the reviewer's value), else the suggestion, else the original |
 | `reject(id, note=None)` | Keep the original value |
 | `apply(df, pipeline=None, item_ids=None, mark=False)` | Write approved values into a copy of `df` (matched on index label and column). Returns `(df, n_written)`; `mark=True` sets them `applied` |
 

@@ -15,7 +15,7 @@ const RELEASES = `${REPO}/releases`;
 const docs = (p: string) => href(`docs/${p}/`);
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 
-const install = `pip install "anomalyguard[server] @ git+${REPO}"`;
+const install = `pip install "anomalyguard[server] @ git+${REPO}@v${VERSION}"`;
 
 const quickstart = `# install the CLI, library and web app
 ${install}
@@ -231,7 +231,7 @@ const canonical = new URL(import.meta.env.BASE_URL, Astro.site).href;
 
 <span class="p">$ </span><span class="c">anomalyguard fix orders.csv -o clean.csv --group-by region</span>
 <span class="o">Wrote 990 rows to clean.csv</span>
-<span class="g">  26 cells fixed</span><span class="o">, 10 rows dropped, </span><span class="a">35 rows flagged for review</span></code></pre>
+<span class="g">  18 cells fixed</span><span class="o">, 10 rows dropped, </span><span class="a">38 rows flagged for review</span></code></pre>
 					</figure>
 				</div>
 			</section>

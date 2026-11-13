@@ -284,7 +284,7 @@ export default function SettingsPage() {
                     ) : (
                       <span className="flex items-center gap-2">
                         <StatusBadge status="missing" />
-                        <code className="bg-muted rounded px-1.5 py-0.5 font-mono text-xs">pip install "anomalyguard[{name}]"</code>
+                        <code className="bg-muted rounded px-1.5 py-0.5 font-mono text-xs break-all">{e.install ?? `pip install "anomalyguard[${name}] @ git+https://github.com/Manas-thakur/anomalyguard@main"`}</code>
                       </span>
                     )}
                   </li>

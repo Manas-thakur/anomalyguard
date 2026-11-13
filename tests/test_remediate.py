@@ -120,8 +120,10 @@ def test_pipeline_end_to_end_on_orders(orders):
     huge = set(np.flatnonzero(out["quantity"].to_numpy() >= 50).tolist())
     flagged_quantity = {f.row for f in result.flagged if f.column == "quantity"}
     assert huge and len(huge) <= len(flagged_quantity)
-    strategies = {c.strategy for c in result.changes}
+    # a cell fixed in two steps (unparseable -> imputed) is one change naming both
+    strategies = {part for c in result.changes for part in c.strategy.split("+")}
     assert {"type_fix", "cap", "impute_median", "impute_mode"} <= strategies
+    assert len({(c.row, c.column) for c in result.changes}) == len(result.changes)
     # the original frame is untouched
     assert df["quantity"].max() >= 150
     rep = result.report()

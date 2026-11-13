@@ -46,17 +46,27 @@ def write_frame(
     return path
 
 
+SINK_SUFFIXES = {
+    ".csv": "csv",
+    ".jsonl": "jsonl",
+    ".ndjson": "jsonl",
+    ".json": "json",
+    ".parquet": "parquet",
+    ".db": "sqlite",
+    ".sqlite": "sqlite",
+}
+
+
 def _guess(path: Path) -> str:
     suffix = path.suffix.lower()
-    return {
-        ".csv": "csv",
-        ".jsonl": "jsonl",
-        ".ndjson": "jsonl",
-        ".json": "json",
-        ".parquet": "parquet",
-        ".db": "sqlite",
-        ".sqlite": "sqlite",
-    }.get(suffix, "csv")
+    if not suffix:
+        return "csv"
+    if suffix not in SINK_SUFFIXES:
+        raise ValueError(
+            f"Cannot write '{path.name}': unsupported file type '{suffix}' "
+            "(use .csv, .jsonl, .json, .parquet, .db or .sqlite)"
+        )
+    return SINK_SUFFIXES[suffix]
 
 
 def write_sink(df: pd.DataFrame, cfg: dict[str, Any], resolve) -> Path:

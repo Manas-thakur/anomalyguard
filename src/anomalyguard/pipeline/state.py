@@ -49,3 +49,5 @@ class PipelineState:
         if self.path.exists():
             self.path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
         self.checkpoints.reset(pipeline)
+        # reference rows kept for incremental detection
+        (self.dir / f"{pipeline}.reference.jsonl").unlink(missing_ok=True)

@@ -30,7 +30,7 @@ AnomalyGuard reads data from files, databases or APIs, validates it against a sc
 ## Quickstart
 
 ```bash
-pip install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard"
+pip install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 
 anomalyguard demo generate -d orders -o orders.csv        # 1,000 synthetic orders with known anomalies
 anomalyguard profile orders.csv                            # types, statistics, quality score
@@ -59,17 +59,20 @@ In the web app, **Analyze a file** walks through the same steps; the command pal
 
 Requires Python 3.10 or newer.
 
+AnomalyGuard is installed from GitHub (it is not on PyPI). These commands install the v0.3.0 release; replace `@v0.3.0` with `@main` for the latest code.
+
 ```bash
 # library + CLI
-pip install "git+https://github.com/Manas-thakur/anomalyguard"
+pip install "anomalyguard @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 
 # with the web app, Parquet and SQLAlchemy (PostgreSQL/MySQL/...) support
-pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard"
+pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 
 # uv
-uv tool install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard"
+uv tool install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
 
-# container image (web app on http://localhost:8765)
+# container image (web app on http://localhost:8765); the volume keeps the database,
+# uploads and pipelines created in the web app
 docker run --rm -p 8765:8765 -v "$PWD/.anomalyguard:/data/.anomalyguard" ghcr.io/manas-thakur/anomalyguard
 ```
 
@@ -80,7 +83,7 @@ docker run --rm -p 8765:8765 -v "$PWD/.anomalyguard:/data/.anomalyguard" ghcr.io
 | `sql` | sqlalchemy | non-SQLite databases (SQLite works without it) |
 | `all` | all of the above | |
 
-The web app is prebuilt into the package, so no Node.js is needed to install or run it. Once a release is on PyPI, `pip install "anomalyguard[server]"` works too. More in [Installation](https://manas-thakur.github.io/anomalyguard/docs/installation/).
+The web app is prebuilt into the package, so no Node.js is needed to install or run it. More in [Installation](https://manas-thakur.github.io/anomalyguard/docs/installation/).
 
 ## Usage
 
@@ -219,10 +222,11 @@ anomalyguard run examples/pipeline.yaml --schedule
 | `ewma` | time series | Residual from an EWMA forecast; spikes are clipped before the state updates | 4.0, span 24 |
 | `seasonal` | time series | Robust trend + per-phase seasonal profile, robust z of the residual | 4.0, period 24 |
 | `cusum` | time series | Two-sided tabular CUSUM on robust-standardised values | h = 5, k = 1.0 |
+| `flatline` | time series | Runs of identical consecutive values (stuck sensor, frozen feed) | learned run length (min 5) |
 | `grouped` | contextual | Any detector fitted separately per group (`group_by`) | per base detector |
 | `ensemble` | ensemble | `mean`, `max` or `weighted` of normalised scores, or `vote` with `min_votes` | 1.0 normalised |
 
-Every raw score is divided by its threshold, so a normalised score above 1.0 always means anomalous. Parameters and guidance on when to use each detector are in the [detector reference](https://manas-thakur.github.io/anomalyguard/docs/reference/detectors/).
+Every raw score is divided by its threshold, so a normalised score above 1.0 always means anomalous. The statistical detectors score positive, right-skewed columns (amounts, latencies) on a log scale (`log_scale: false` or `--no-log-scale` to turn it off). With a time column, time-series detectors run on a regular time grid, so gaps do not shift seasonal phases. On the CLI, `--param DETECTOR.KEY=VALUE` sets any parameter (`--param seasonal.period=168`). Parameters and guidance on when to use each detector are in the [detector reference](https://manas-thakur.github.io/anomalyguard/docs/reference/detectors/).
 
 ## Benchmarks
 

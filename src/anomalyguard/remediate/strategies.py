@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from anomalyguard.detect.base import fmt
-from anomalyguard.schema.coercion import coerce_series, is_missing
+from anomalyguard.schema.coercion import coerce_series, is_missing, whole_numbers
 from anomalyguard.schema.registry import DataType
 
 
@@ -110,13 +110,25 @@ class Impute(Strategy):
         "constant": 0.9,
     }
 
-    def __init__(self, method: str = "median", value: Any = None):
+    def __init__(
+        self,
+        method: str = "median",
+        value: Any = None,
+        groups: pd.Series | None = None,
+        min_group_size: int = 8,
+    ):
         if method not in self.CONFIDENCE:
             raise ValueError(f"Unknown imputation method '{method}'")
         self.method = method
         self.value = value
         self.name = f"impute_{method}"
         self.confidence = self.CONFIDENCE[method]
+        self.groups = groups  # mean/median are computed per group when given
+        self.min_group_size = min_group_size
+
+    def _stat(self, nums: pd.Series, integer: bool) -> float:
+        fill = float(nums.mean() if self.method == "mean" else nums.median())
+        return round(fill) if integer else fill
 
     def apply(self, df, column, mask, reason=""):
         rows = np.flatnonzero(mask)
@@ -129,12 +141,21 @@ class Impute(Strategy):
             nums = _numeric(clean).dropna()
             if nums.empty:
                 return []
-            fill = float(nums.mean() if self.method == "mean" else nums.median())
-            if pd.api.types.is_integer_dtype(s.dtype) or (
+            integer = pd.api.types.is_integer_dtype(s.dtype) or bool(
                 len(nums) and np.all(np.mod(nums, 1) == 0)
-            ):
-                fill = round(fill)
-            _set(df, rows, column, fill)
+            )
+            fill = self._stat(nums, integer)
+            if self.groups is None:
+                _set(df, rows, column, fill)
+            else:
+                keys = self.groups.astype(str).reset_index(drop=True)
+                values = _numeric(s).reset_index(drop=True)
+                fills = []
+                for r in rows.tolist():
+                    same = (keys == keys.iloc[r]).to_numpy() & ~mask
+                    g = values[same].dropna()
+                    fills.append(self._stat(g, integer) if len(g) >= self.min_group_size else fill)
+                _set(df, rows, column, np.asarray(fills, dtype=float))
         elif self.method == "mode":
             if clean.empty:
                 return []
@@ -171,9 +192,34 @@ def _decimals(s: pd.Series, limit: int = 6) -> int:
     return places
 
 
+def never_negative(
+    values: pd.Series, mask: np.ndarray | None = None, schema_min: float | None = None
+) -> bool:
+    """A column that is (almost) never negative: schema ``min >= 0``, no negative
+    value among the unflagged cells, or fewer than 1% of all values below zero
+    (those few are the anomalies)."""
+    if schema_min is not None and schema_min >= 0:
+        return True
+    present = _numeric(values)
+    clean = present[~mask].dropna() if mask is not None else present.dropna()
+    present = present.dropna()
+    if not len(present) or present.median() <= 0:
+        return False
+    return bool(len(clean) and clean.min() >= 0) or float((present < 0).mean()) < 0.01
+
+
 class Cap(Strategy):
     """Clip flagged values to robust fences ``median +- k * MAD / 0.6745``
-    computed from the unflagged values (the same fences as the MAD detector).
+    computed from the unflagged values (the same fences as the MAD detector;
+    on a log scale for positive, right-skewed columns).
+
+    * ``groups`` (one key per row): fences are computed within each group from
+      that group's unflagged values, so a value is never pulled into another
+      group's range (e.g. yen prices into a dollar range). Groups with fewer
+      than ``min_group_size`` unflagged values use the column's fences.
+    * Columns that are never negative get a lower fence of at least 0, and
+      integer columns get fences rounded outward (floor/ceil), so values on
+      the boundary are not nudged.
 
     Capping is only safe for values that are moderately out of range. A value
     far beyond the fences (by default more than ``max_stretch`` fence widths
@@ -181,69 +227,132 @@ class Cap(Strategy):
     that is never negative is a different kind of error: clipping it would
     write a plausible-looking but wrong number. Such values are left as they
     are (the remediation pipeline sends them to review) and listed in
-    :attr:`skipped` with the reason.
+    :attr:`skipped` with the reason, as are flagged values that already lie
+    inside the fences.
     """
 
     name = "cap"
     confidence = 0.8
 
-    def __init__(self, k: float = 3.5, max_stretch: float = 3.0):
+    def __init__(
+        self,
+        k: float = 3.5,
+        max_stretch: float = 3.0,
+        groups: pd.Series | None = None,
+        group_label: str = "group",
+        min_group_size: int = 8,
+        non_negative: bool | None = None,
+    ):
         self.k = k
         self.max_stretch = max_stretch
+        self.groups = groups
+        self.group_label = group_label
+        self.min_group_size = min_group_size
+        self.non_negative = non_negative
         self.skipped: dict[int, str] = {}
 
-    def bounds(self, s: pd.Series, mask: np.ndarray) -> tuple[float, float] | None:
-        clean = _numeric(s[~mask]).dropna()
+    def _fences(self, clean: pd.Series) -> tuple[float, float, bool] | None:
+        """``(lo, hi, log)``: fences on the working scale (log when ``log``)."""
+        from anomalyguard.detect.statistical import prefers_log_scale
+
+        clean = clean.dropna()
         if clean.empty:
             return None
-        med = float(clean.median())
-        mad = float((clean - med).abs().median())
+        log = prefers_log_scale(clean.to_numpy(dtype=float))
+        x = np.log(clean[clean > 0]) if log else clean
+        med = float(x.median())
+        mad = float((x - med).abs().median())
         if mad == 0:
-            mad = float((clean - med).abs().mean()) * 1.2533 * 0.6745
+            mad = float((x - med).abs().mean()) * 1.2533 * 0.6745
         width = self.k * mad / 0.6745
-        return med - width, med + width
+        return med - width, med + width, log
+
+    def bounds(self, s: pd.Series, mask: np.ndarray) -> tuple[float, float] | None:
+        """Column-wide fences on the original scale."""
+        f = self._fences(_numeric(s[~mask]))
+        if f is None:
+            return None
+        lo, hi, log = f
+        return (float(np.exp(lo)), float(np.exp(hi))) if log else (lo, hi)
 
     def apply(self, df, column, mask, reason=""):
         self.skipped = {}
         rows = np.flatnonzero(mask)
-        b = self.bounds(df[column], mask)
-        if not len(rows) or b is None:
-            return []
-        lo, hi = b
-        nums = _numeric(df[column])
-        clean = nums[~mask].dropna()
-        non_negative = bool(len(clean)) and float(clean.min()) >= 0
-        reach = self.max_stretch * max(hi - lo, 1e-12) / 2
-        keep = []
-        for r in rows.tolist():
-            v = nums.iloc[r]
-            if pd.isna(v):
-                continue
-            if non_negative and v < 0:
-                self.skipped[r] = (
-                    f"negative value in a column that is never negative; not capped "
-                    f"(expected {fmt(lo)} to {fmt(hi)})"
-                )
-            elif v > hi + reach or v < lo - reach:
-                self.skipped[r] = (
-                    f"too far outside the expected range {fmt(lo)} to {fmt(hi)} to cap "
-                    f"safely (possible unit or typing error)"
-                )
-            else:
-                keep.append(r)
-        rows = np.asarray(keep, dtype=int)
         if not len(rows):
             return []
-        before = df[column].copy()
-        vals = nums.iloc[rows].clip(lo, hi)
-        if pd.api.types.is_integer_dtype(df[column].dtype) or np.all(np.mod(clean, 1) == 0):
-            vals = vals.round()
-        else:
-            vals = vals.round(_decimals(clean))
-        _set(df, rows, column, vals.to_numpy())
-        return self._changes(
-            before, df, column, rows, reason or f"capped to [{fmt(b[0])}, {fmt(b[1])}]"
+        nums = _numeric(df[column])
+        all_clean = nums[~mask].dropna()
+        column_fences = self._fences(all_clean)
+        if column_fences is None:
+            return []
+        non_negative = (
+            self.non_negative if self.non_negative is not None else never_negative(nums, mask)
         )
+        integer = pd.api.types.is_integer_dtype(df[column].dtype) or bool(
+            len(all_clean) and np.all(np.mod(all_clean, 1) == 0)
+        )
+        decimals = _decimals(all_clean)
+        if self.groups is not None:
+            keys = self.groups.astype(str).reset_index(drop=True)
+            batches = keys.iloc[rows].groupby(keys.iloc[rows]).groups
+            batches = {k: np.asarray(v) for k, v in batches.items()}
+        else:
+            keys = None
+            batches = {None: rows}
+
+        before = df[column].copy()
+        new_values: dict[int, float] = {}
+        notes: dict[int, str] = {}
+        for key, group_rows in batches.items():
+            fences, where = column_fences, ""
+            if keys is not None:
+                in_group = (keys == key).to_numpy()
+                g_clean = nums[in_group & ~mask].dropna()
+                if len(g_clean) >= self.min_group_size:
+                    fences = self._fences(g_clean) or column_fences
+                    where = f" for {self.group_label}={key}"
+                else:
+                    where = f" (column range; {self.group_label}={key} has too few values)"
+            lo_s, hi_s, log = fences
+            reach = self.max_stretch * max(hi_s - lo_s, 1e-12) / 2
+            lo, hi = (float(np.exp(lo_s)), float(np.exp(hi_s))) if log else (lo_s, hi_s)
+            if non_negative:
+                lo = max(lo, 0.0)
+            if integer:
+                lo, hi = float(np.floor(lo)), float(np.ceil(hi))
+            expected = f"expected {fmt(lo)} to {fmt(hi)}{where}"
+            for r in np.asarray(group_rows).tolist():
+                v = nums.iloc[r]
+                if pd.isna(v):
+                    continue
+                if non_negative and v < 0:
+                    self.skipped[r] = (
+                        f"negative value in a column that is never negative; not capped ({expected})"
+                    )
+                    continue
+                v_s = (np.log(v) if v > 0 else -np.inf) if log else v
+                if v_s > hi_s + reach or v_s < lo_s - reach:
+                    self.skipped[r] = (
+                        f"too far outside the expected range ({expected}) to cap safely "
+                        "(possible unit or typing error)"
+                    )
+                elif lo <= v <= hi:
+                    self.skipped[r] = f"within the capping range ({expected}); left unchanged"
+                else:
+                    capped = min(max(v, lo), hi)
+                    new_values[r] = round(capped) if integer else round(capped, decimals)
+                    notes[r] = f"capped to [{fmt(lo)}, {fmt(hi)}]{where}"
+        if not new_values:
+            return []
+        changed = np.asarray(sorted(new_values), dtype=int)
+        _set(df, changed, column, np.asarray([new_values[r] for r in changed.tolist()]))
+        out = []
+        for r in changed.tolist():
+            b, a = before.iloc[r], df[column].iloc[r]
+            if not is_missing(b) and not is_missing(a) and b == a:
+                continue
+            out.append(Change(r, column, b, a, self.name, reason or notes[r], self.confidence))
+        return out
 
 
 class Winsorize(Strategy):
@@ -326,7 +435,7 @@ class TypeFix(Strategy):
             if (
                 self.dtype == DataType.INTEGER
                 and len(nn)
-                and np.all(np.mod(nn, 1) == 0)
+                and whole_numbers(nn)
                 and not coerced.isna().any()
             ):
                 coerced = coerced.astype("int64")

@@ -24,6 +24,9 @@ export interface RunRow {
   alerts_sent: number;
   duration_ms: number | null;
   detectors: Record<string, number>;
+  /** This pipeline's own run sequence (1 = its first run); `id` is global. */
+  run_number?: number | null;
+  kind?: "analysis" | "pipeline";
 }
 
 export interface Breakdown {
@@ -34,14 +37,23 @@ export interface Breakdown {
   rows: number;
 }
 
+export interface AlertDelivery {
+  channel: string;
+  ok: boolean;
+  error: string | null;
+}
+
 export interface AlertRow {
   id: number;
   run_id: number;
   created_at: string;
   severity: string;
   title: string;
+  /** sent (every channel delivered), partial, failed, duplicate, rate_limited or filtered */
   status: string;
+  /** channels that delivered the alert, comma-separated */
   channels: string;
+  deliveries?: AlertDelivery[];
   pipeline: string;
 }
 
@@ -501,7 +513,7 @@ export interface Settings {
     review_pending: number;
     uploads: number;
   };
-  extras: Record<string, { installed: boolean; missing: string[] }>;
+  extras: Record<string, { installed: boolean; missing: string[]; install?: string }>;
   env: { name: string; set: boolean; value: string | null; purpose: string }[];
   notifiers: {
     pipeline: string;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,9 +20,13 @@ def _cell(v: Any, width: int = 60) -> str:
     if v is None:
         return "-"
     if isinstance(v, float):
-        if v == int(v) and abs(v) < 1e15:
+        if math.isnan(v):
+            s = "-"
+        elif math.isinf(v):
+            s = "inf" if v > 0 else "-inf"
+        elif v == int(v) and abs(v) < 1e15:
             s = str(int(v))
-        elif abs(v) >= 1000:
+        elif 1000 <= abs(v) < 1e15:
             s = f"{v:.1f}"
         else:
             s = f"{v:.4g}"
@@ -50,13 +55,131 @@ def _split(value: str | None) -> list[str] | None:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
-def _read(path: str, args: argparse.Namespace):
-    from anomalyguard.ingest import read_any
+class CLIError(Exception):
+    """A usage error reported as ``error: ...`` with exit code 2."""
 
-    opts = {}
+
+def _read(path: str, args: argparse.Namespace):
+    from anomalyguard.ingest import guess_type, read_any
+
+    opts: dict[str, Any] = {}
     if getattr(args, "table", None):
         opts["table"] = args.table
-    return read_any(path, **opts)
+    try:
+        kind = guess_type(path)
+    except Exception:
+        kind = None
+    if kind == "csv":
+        if getattr(args, "delimiter", None):
+            opts["delimiter"] = args.delimiter
+        if getattr(args, "na_values", None) is not None:
+            opts["na_values"] = _split(args.na_values) or []
+        if getattr(args, "decimal", None):
+            opts["decimal"] = args.decimal
+    if getattr(args, "encoding", None) and kind in ("csv", "json", "jsonl"):
+        opts["encoding"] = args.encoding
+    df = read_any(path, **opts)
+    if df.empty:
+        raise CLIError(f"{path}: no data rows to analyse")
+    return df
+
+
+def _parse_params(items: list[str] | None, methods: list[str]) -> dict[str, dict[str, Any]]:
+    """``--param detector.key=value`` -> ``{canonical detector: {key: value}}``."""
+    import yaml
+
+    out: dict[str, dict[str, Any]] = {}
+    known = {_canonical(m) for m in methods}
+    for item in items or []:
+        if "=" not in item or "." not in item.split("=", 1)[0]:
+            raise CLIError(f"--param {item!r}: use detector.key=value, e.g. seasonal.period=24")
+        target, raw = item.split("=", 1)
+        det, key = target.split(".", 1)
+        det_name = _canonical(det)
+        if det_name not in known:
+            raise CLIError(
+                f"--param {item!r}: '{det}' is not one of the detectors given with -m "
+                f"({', '.join(methods)})"
+            )
+        try:
+            value = yaml.safe_load(raw) if raw.strip() else None
+        except yaml.YAMLError:
+            value = raw
+        if key.strip() in ("detectors", "columns", "group_by") and isinstance(value, str):
+            value = [v.strip() for v in value.split(",") if v.strip()]
+        out.setdefault(det_name, {})[key.strip()] = value
+    return out
+
+
+def _canonical(name: str) -> str:
+    from anomalyguard.detect.registry import canonical_name
+
+    key = name.strip().lower()
+    if key == "ensemble":
+        return key
+    try:
+        return canonical_name(name)
+    except KeyError as exc:
+        raise CLIError(exc.args[0]) from None
+
+
+LOG_SCALE_DETECTORS = {"zscore", "mad", "iqr", "grubbs"}
+
+
+def _method_specs(args: argparse.Namespace, default: list[str]) -> list[Any]:
+    if args.method is not None and not args.method.strip(", "):
+        raise CLIError("-m/--method is empty; pass detector names, e.g. -m mad,iforest")
+    methods = _split(args.method) or list(default)
+    params = _parse_params(getattr(args, "param", None), methods)
+    specs: list[Any] = []
+    for m in methods:
+        key = _canonical(m)
+        spec: dict[str, Any] = {"method": m, **params.get(key, {})}
+        if getattr(args, "contamination", None) is not None and key != "ensemble":
+            spec.setdefault("contamination", args.contamination)
+        if getattr(args, "no_log_scale", False) and key in LOG_SCALE_DETECTORS:
+            spec.setdefault("log_scale", False)
+        specs.append(spec)
+    return specs
+
+
+def _tuned_thresholds(args: argparse.Namespace) -> dict[str, float] | None:
+    """Thresholds tuned by 'feedback tune', when the state database has any."""
+    if getattr(args, "no_tuned_thresholds", False):
+        return None
+    db = Path(getattr(args, "db", None) or "")
+    if not db.is_file():
+        return None
+    from anomalyguard.monitor.store import MetricsStore
+
+    try:
+        mult = {k: v for k, v in MetricsStore(db).thresholds().items() if v != 1.0}
+    except Exception:  # an unreadable state db must not stop a scan
+        return None
+    if mult:
+        shown = ", ".join(f"{k} x{v:.2f}" for k, v in sorted(mult.items()))
+        print(
+            f"Using tuned thresholds from {db}: {shown} (--no-tuned-thresholds to ignore)",
+            file=sys.stderr,
+        )
+    return mult or None
+
+
+def _detect_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "columns": _split(args.columns),
+        "group_by": _split(args.group_by),
+        "time_column": args.time_column,
+        "threshold_multipliers": _tuned_thresholds(args),
+    }
+
+
+def _parse_value(text: str) -> Any:
+    """A number (or true/false/null) if it parses as JSON, else the text."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 def _load_schema(path: str | None):
@@ -159,19 +282,15 @@ def _print_report(report, top: int) -> None:
 def cmd_detect(args: argparse.Namespace) -> int:
     import anomalyguard as ag
 
+    specs = _method_specs(args, ["mad", "iforest"])
     df = _read(args.path, args)
-    methods: list[Any] = _split(args.method) or ["mad", "iforest"]
-    if args.contamination is not None:
-        methods = [{"method": m, "contamination": args.contamination} for m in methods]
     report = ag.detect(
         df,
-        methods,
+        specs,
         schema=_load_schema(args.schema),
-        columns=_split(args.columns),
-        group_by=args.group_by,
-        time_column=args.time_column,
         combine=args.combine,
         min_votes=args.min_votes,
+        **_detect_kwargs(args),
     )
     if args.output:
         report.to_json(args.output)
@@ -179,9 +298,18 @@ def cmd_detect(args: argparse.Namespace) -> int:
         print(report.to_json(limit=args.top))
     else:
         _print_report(report, args.top)
+        if args.show_ids:
+            _print_findings(report)
         if args.output:
             print(f"\nFull report written to {args.output}")
     return 1 if (args.fail_on_anomalies and report.n_anomalies) else 0
+
+
+def _print_findings(report) -> None:
+    findings = sorted(report.findings, key=lambda f: -f.score)
+    print(f"\nAll findings ({len(findings)}; row = 0-based position in the file):")
+    rows = [[f.row, f.index, f.column or "(row)", f.detector, f.score] for f in findings]
+    print(table(rows, ["row", "index", "column", "detector", "score"]))
 
 
 def cmd_fix(args: argparse.Namespace) -> int:
@@ -190,23 +318,27 @@ def cmd_fix(args: argparse.Namespace) -> int:
     from anomalyguard.pipeline.sinks import write_frame
     from anomalyguard.remediate import RemediationPipeline, RemediationPolicy, ReviewQueue
 
+    default: dict[str, Any] = {
+        "missing": args.missing,
+        "outlier": args.outlier,
+        "invalid": args.invalid,
+    }
+    if args.missing_value is not None:
+        default["constant"] = _parse_value(args.missing_value)
+    if args.min is not None:
+        default["min"] = args.min
+    if args.max is not None:
+        default["max"] = args.max
+    try:
+        policy = RemediationPolicy.from_dict(
+            {"default": default, "dedupe": not args.no_dedupe, "flag_column": args.flag_column}
+        )
+    except ValueError as exc:
+        raise CLIError(str(exc)) from None
+    specs = _method_specs(args, ["mad"])
     df = _read(args.path, args)
     schema = _load_schema(args.schema) or infer_schema(df, name=Path(args.path).stem)
-    policy = RemediationPolicy.from_dict(
-        {
-            "default": {"missing": args.missing, "outlier": args.outlier, "invalid": args.invalid},
-            "dedupe": not args.no_dedupe,
-            "flag_column": args.flag_column,
-        }
-    )
-    report = ag.detect(
-        df,
-        _split(args.method) or ["mad"],
-        schema=schema,
-        columns=_split(args.columns),
-        group_by=args.group_by,
-        time_column=args.time_column,
-    )
+    report = ag.detect(df, specs, schema=schema, **_detect_kwargs(args))
     result = RemediationPipeline(policy, schema=schema).run(df, report)
     write_frame(result.data, args.output)
     rep = result.report()
@@ -244,17 +376,24 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(json.dumps(result.to_dict(), indent=2, default=str))
             return
         m = result.metrics
+        # the pipeline's own run number, plus the global id used by the web app and API
+        run = f"run {result.run_number}" if result.run_number else "run"
+        if result.run_id is not None:
+            run += f" (#{result.run_id})"
         if result.status == "failed":
-            print(f"[{result.name}] run #{result.run_id} FAILED: {result.error}")
+            print(f"[{result.name}] {run} FAILED: {result.error}")
             return
         if result.status == "empty":
-            print(f"[{result.name}] run #{result.run_id}: no new data")
+            print(f"[{result.name}] {run}: no new data")
             return
+        failed_alerts = m.get("alerts_failed", 0)
         print(
-            f"[{result.name}] run #{result.run_id}: {m.get('rows')} rows, {m.get('n_anomalies')} anomalies "
+            f"[{result.name}] {run}: {m.get('rows')} rows, {m.get('n_anomalies')} anomalies "
             f"({pct(m.get('anomaly_rate'))}), quality {pct(m.get('quality_score'))}, "
             f"{m.get('cells_changed', 0)} cells fixed, {m.get('rows_dropped', 0)} dropped, "
-            f"{m.get('flagged_for_review', 0)} flagged, {m.get('alerts_sent', 0)} alerts, {m.get('duration_ms', 0):.0f} ms"
+            f"{m.get('flagged_for_review', 0)} flagged, {m.get('alerts_sent', 0)} alerts"
+            + (f" ({failed_alerts} with failed deliveries)" if failed_alerts else "")
+            + f", {m.get('duration_ms', 0):.0f} ms"
         )
         for k, v in result.outputs.items():
             print(f"    {k}: {v}")
@@ -320,8 +459,13 @@ def cmd_demo_generate(args: argparse.Namespace) -> int:
     from anomalyguard.demo import generate
     from anomalyguard.pipeline.sinks import write_frame
 
-    df, labels = generate(args.dataset, rows=args.rows, seed=args.seed)
+    if args.rows is not None and args.rows < 1:
+        raise CLIError(f"-n/--rows must be at least 1 (got {args.rows})")
     out = Path(args.output or f"{args.dataset}.csv")
+    for p in (out, Path(args.labels) if args.labels else None):
+        if p is not None and p.suffix.lower() not in (".csv", ".parquet", ".jsonl"):
+            raise CLIError(f"cannot write {p.name}: use a .csv, .parquet or .jsonl file name")
+    df, labels = generate(args.dataset, rows=args.rows, seed=args.seed)
     write_frame(df, out)
     labels_path = Path(args.labels) if args.labels else out.with_name(out.stem + "_labels.csv")
     write_frame(labels, labels_path)
@@ -359,8 +503,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         from anomalyguard.monitor.api import create_app
         from anomalyguard.monitor.settings import ServerSettings
     except ImportError:
+        from anomalyguard.monitor.doctor import install_command
+
         print(
-            "The web app needs the server extra: pip install 'anomalyguard[server]'",
+            f"The web app needs the server extra: {install_command('server')}",
             file=sys.stderr,
         )
         return 1
@@ -442,6 +588,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"  {mark(p['valid'])}{p['name'] or '?':<20} {p['file']}")
         if p["error"]:
             print(f"        {p['error']}")
+        for w in p.get("warnings") or []:
+            print(f"        warning: {w}")
     if info["notifiers"]:
         print("\nNotifiers")
         for entry in info["notifiers"]:
@@ -460,9 +608,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if not st["writable"] else 0
 
 
+def _existing_db(path: str) -> bool:
+    """Commands that only read or update state must not create a database at a mistyped path."""
+    if Path(path).is_file():
+        return True
+    print(
+        f"error: database not found: {path} (pass --db with the path used by 'run', 'fix --review-db' or 'serve')",
+        file=sys.stderr,
+    )
+    return False
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     from anomalyguard.remediate import ReviewQueue
 
+    if not _existing_db(args.db):
+        return 1
     q = ReviewQueue(args.db)
     if args.action == "list":
         items = q.list(status=None if args.status == "all" else args.status, limit=args.limit)
@@ -507,6 +668,14 @@ def cmd_review(args: argparse.Namespace) -> int:
     except KeyError as exc:
         print(f"error: {exc.args[0]}", file=sys.stderr)
         return 1
+    if item["column"] is None:
+        # whole-row items (e.g. a multivariate anomaly) have no cell to write
+        print(
+            f"Item {item['id']} {item['status']}: it flags the whole row "
+            f"{item['row_index']!r}, so there is no cell value to set; "
+            "the decision is recorded and 'apply' leaves the data unchanged."
+        )
+        return 0
     print(f"Item {item['id']} {item['status']} (value: {item['resolved_value']!r})")
     return 0
 
@@ -514,6 +683,8 @@ def cmd_review(args: argparse.Namespace) -> int:
 def cmd_feedback(args: argparse.Namespace) -> int:
     from anomalyguard.monitor import FeedbackLoop, MetricsStore
 
+    if not _existing_db(args.db):
+        return 1
     store = MetricsStore(args.db)
     loop = FeedbackLoop(store)
     if args.action == "tune":
@@ -548,8 +719,53 @@ def cmd_feedback(args: argparse.Namespace) -> int:
         print("error: pass --anomaly-id (see the dashboard) or --detector", file=sys.stderr)
         return 2
     label = "false_positive" if args.action == "fp" else "true_positive"
-    fid = loop.mark(label, anomaly_id=args.anomaly_id, detector=args.detector, note=args.note)
+    try:
+        fid = loop.mark(label, anomaly_id=args.anomaly_id, detector=args.detector, note=args.note)
+    except KeyError as exc:
+        print(f"error: {exc.args[0]}", file=sys.stderr)
+        if args.anomaly_id is not None:
+            print("  list finding ids with: anomalyguard findings RUN_ID", file=sys.stderr)
+        return 1 if args.anomaly_id is not None else 2
     print(f"Recorded feedback #{fid}: {label}")
+    return 0
+
+
+def cmd_findings(args: argparse.Namespace) -> int:
+    from anomalyguard.monitor import MetricsStore
+
+    if not _existing_db(args.db):
+        return 1
+    store = MetricsStore(args.db)
+    run_id = args.run_id
+    if run_id is None:
+        runs = store.runs(limit=1, kind="pipeline")
+        if not runs:
+            print("No runs recorded yet.")
+            return 0
+        run_id = int(runs[0]["id"])
+    run = store.get_run(run_id)
+    if run is None:
+        print(f"error: run {run_id} not found", file=sys.stderr)
+        return 1
+    total = store.count_anomalies(run_id, column=args.column, detector=args.detector)
+    items = store.anomalies(run_id, limit=args.limit, column=args.column, detector=args.detector)
+    if args.json:
+        print(json.dumps({"run_id": run_id, "total": total, "findings": items}, default=str))
+        return 0
+    print(
+        f"Run #{run_id} ({run['pipeline']}, run {run.get('run_number')}): "
+        f"{total} stored findings, highest score first"
+    )
+    if not items:
+        return 0
+    rows = [
+        [a["id"], a["row_index"], a["column"] or "(row)", a["detector"], a["score"], a["reason"]]
+        for a in items
+    ]
+    print(table(rows, ["id", "row", "column", "detector", "score", "reason"], max_width=70))
+    if total > len(items):
+        print(f"... {total - len(items)} more (use --limit)")
+    print("\nMark one: anomalyguard feedback fp --anomaly-id ID   (or tp for a real anomaly)")
     return 0
 
 
@@ -564,6 +780,65 @@ def cmd_detectors(args: argparse.Namespace) -> int:
 # ----------------------------------------------------------------------
 # parser
 # ----------------------------------------------------------------------
+def _data_options(sp: argparse.ArgumentParser) -> None:
+    sp.add_argument("--table", help="table name for SQLite files")
+    sp.add_argument(
+        "--delimiter",
+        "--sep",
+        dest="delimiter",
+        help="CSV field delimiter (default: sniffed from the file; '\\t' or 'tab' for tabs)",
+    )
+    sp.add_argument(
+        "--encoding", help="file encoding (default: UTF-8, falling back to cp1252/latin-1)"
+    )
+    sp.add_argument(
+        "--na-values",
+        help="extra CSV cell values to read as missing, comma-separated (e.g. 'NA,N/A,null'); "
+        "by default only empty cells are missing",
+    )
+    sp.add_argument("--decimal", help="CSV decimal separator (default: '.', or ',' when detected)")
+
+
+def _detect_options(sp: argparse.ArgumentParser, default_methods: str, db_default: str) -> None:
+    sp.add_argument(
+        "-m",
+        "--method",
+        default=None,
+        help=f"comma-separated detectors (default: {default_methods}; see 'anomalyguard detectors')",
+    )
+    sp.add_argument("--columns", help="comma-separated columns (default: all numeric)")
+    sp.add_argument(
+        "--group-by",
+        help="detect within groups of these column(s), comma-separated (contextual anomalies)",
+    )
+    sp.add_argument(
+        "--time-column",
+        help="time column: rows are sorted by it and time-series detectors run on a regular grid",
+    )
+    sp.add_argument(
+        "--param",
+        action="append",
+        metavar="DETECTOR.KEY=VALUE",
+        help="detector parameter, repeatable (e.g. seasonal.period=24, rolling_zscore.window=48, "
+        "ensemble.detectors=mad,iforest)",
+    )
+    sp.add_argument(
+        "--no-log-scale",
+        action="store_true",
+        help="score skewed positive columns on their original scale instead of a log scale",
+    )
+    sp.add_argument(
+        "--db",
+        default=db_default,
+        help="state database whose tuned thresholds ('feedback tune') are applied if present",
+    )
+    sp.add_argument(
+        "--no-tuned-thresholds",
+        action="store_true",
+        help="ignore thresholds tuned with 'feedback tune'",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     from anomalyguard.monitor.store import DEFAULT_DB
 
@@ -576,40 +851,37 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path")
     sp.add_argument("--schema", help="validate against this schema instead of inferring one")
     sp.add_argument("--schema-out", help="write the inferred schema (YAML/JSON)")
-    sp.add_argument("--table", help="table name for SQLite files")
+    _data_options(sp)
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_profile)
 
     sp = sub.add_parser("validate", help="validate a dataset against a schema file")
     sp.add_argument("path")
     sp.add_argument("--schema", required=True)
-    sp.add_argument("--table")
+    _data_options(sp)
     sp.add_argument("--max-errors", type=int, default=20)
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_validate)
 
     sp = sub.add_parser("detect", help="detect anomalies and explain them")
     sp.add_argument("path")
-    sp.add_argument(
-        "-m",
-        "--method",
-        default="mad,iforest",
-        help="comma-separated detectors (see 'anomalyguard detectors')",
-    )
-    sp.add_argument("--columns", help="comma-separated columns (default: all numeric)")
-    sp.add_argument("--group-by", help="detect within groups of this column (contextual anomalies)")
-    sp.add_argument("--time-column", help="sort by this column first (time-series detectors)")
+    _detect_options(sp, "mad,iforest", DEFAULT_DB)
     sp.add_argument("--combine", choices=["any", "vote", "all"], default="any")
-    sp.add_argument("--min-votes", type=int, default=2)
+    sp.add_argument(
+        "--min-votes", type=int, default=2, help="detectors that must agree with --combine vote"
+    )
     sp.add_argument(
         "--contamination",
         type=float,
         help="flag this share of rows per detector instead of fixed thresholds",
     )
     sp.add_argument("--schema")
-    sp.add_argument("--table")
+    _data_options(sp)
     sp.add_argument("-o", "--output", help="write the full JSON report here")
     sp.add_argument("--top", type=int, default=10)
+    sp.add_argument(
+        "--show-ids", action="store_true", help="also list every finding (row, column, detector)"
+    )
     sp.add_argument("--json", action="store_true")
     sp.add_argument(
         "--fail-on-anomalies", action="store_true", help="exit code 1 if anomalies are found"
@@ -621,20 +893,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "-o", "--output", required=True, help="cleaned output (.csv, .jsonl, .json, .parquet)"
     )
-    sp.add_argument("-m", "--method", default="mad")
-    sp.add_argument("--columns")
-    sp.add_argument("--group-by")
-    sp.add_argument("--time-column")
+    _detect_options(sp, "mad", DEFAULT_DB)
     sp.add_argument("--schema")
-    sp.add_argument("--table")
+    _data_options(sp)
     sp.add_argument(
         "--missing",
         default="auto",
-        help="auto|mean|median|mode|ffill|bfill|interpolate|drop|flag|keep",
+        help="auto|mean|median|mode|ffill|bfill|interpolate|constant|drop|flag|keep",
     )
+    sp.add_argument("--missing-value", help="fill value for --missing constant")
     sp.add_argument(
-        "--outlier", default="cap", help="cap|winsorize|median|mean|null|flag|drop|keep"
+        "--outlier", default="cap", help="cap|winsorize|clip|median|mean|null|flag|drop|keep"
     )
+    sp.add_argument("--min", type=float, help="lower bound for --outlier clip")
+    sp.add_argument("--max", type=float, help="upper bound for --outlier clip")
     sp.add_argument("--invalid", default="coerce", help="coerce|drop|flag|keep (type errors)")
     sp.add_argument("--no-dedupe", action="store_true")
     sp.add_argument("--flag-column", help="add a boolean column marking rows that need review")
@@ -707,7 +979,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--value", help="value to use when approving (JSON or text)")
     sp.add_argument("--note")
     sp.add_argument(
-        "--status", default="pending", choices=["pending", "approved", "rejected", "all"]
+        "--status",
+        default="pending",
+        choices=["pending", "approved", "rejected", "applied", "all"],
     )
     sp.add_argument("--limit", type=int, default=50)
     sp.add_argument("--db", default=DEFAULT_DB)
@@ -717,11 +991,22 @@ def build_parser() -> argparse.ArgumentParser:
         "feedback", help="mark anomalies as false/true positives and tune thresholds"
     )
     sp.add_argument("action", choices=["fp", "tp", "stats", "tune"])
-    sp.add_argument("--anomaly-id", type=int)
-    sp.add_argument("--detector")
+    sp.add_argument("--anomaly-id", type=int, help="finding id (see 'anomalyguard findings')")
+    sp.add_argument("--detector", help="detector name, e.g. mad or 'grouped(mad by region)'")
     sp.add_argument("--note")
     sp.add_argument("--db", default=DEFAULT_DB)
     sp.set_defaults(func=cmd_feedback)
+
+    sp = sub.add_parser(
+        "findings", help="list a run's stored findings and their ids (for 'feedback')"
+    )
+    sp.add_argument("run_id", nargs="?", type=int, help="run id (default: the latest run)")
+    sp.add_argument("--column")
+    sp.add_argument("--detector")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--db", default=DEFAULT_DB)
+    sp.set_defaults(func=cmd_findings)
 
     sp = sub.add_parser("detectors", help="list available detectors")
     sp.set_defaults(func=cmd_detectors)
@@ -738,17 +1023,32 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
-        format="%(levelname)s %(name)s: %(message)s",
+        format="%(levelname)s %(name)s: %(message)s" if args.verbose else "%(message)s",
     )
+    if not args.verbose:
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(_PlainFormatter())
     try:
         return int(args.func(args) or 0)
     except KeyboardInterrupt:
         return 130
+    except CLIError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except Exception as exc:
         if args.verbose:
             raise
-        print(f"error: {exc}", file=sys.stderr)
+        # KeyError's str() adds quotes around the message
+        msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        print(f"error: {msg}", file=sys.stderr)
         return 1
+
+
+class _PlainFormatter(logging.Formatter):
+    """``warning: message`` like the rest of the CLI's output."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return f"{record.levelname.lower()}: {record.getMessage()}"
 
 
 if __name__ == "__main__":

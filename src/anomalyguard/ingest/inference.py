@@ -8,7 +8,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from anomalyguard.schema.coercion import FALSE_VALUES, TRUE_VALUES, _clean_numeric_strings
+from anomalyguard.schema.coercion import (
+    FALSE_VALUES,
+    TRUE_VALUES,
+    _clean_numeric_strings,
+    _nan_tokens,
+    whole_numbers,
+)
 from anomalyguard.schema.registry import DataType, Field, Schema
 
 NUMERIC_RATIO = 0.9  # share of present values that must parse for a numeric column
@@ -24,6 +30,7 @@ EMAIL_PATTERN = r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}"
 def infer_dtype(series: pd.Series) -> DataType:
     """Infer the logical type of a column, tolerating a few malformed values."""
     s = series.dropna()
+    s = s[~_nan_tokens(s)]
     if s.empty:
         return DataType.UNKNOWN
     if pd.api.types.is_bool_dtype(series):
@@ -31,7 +38,9 @@ def infer_dtype(series: pd.Series) -> DataType:
     if pd.api.types.is_datetime64_any_dtype(series):
         return DataType.DATETIME
     if pd.api.types.is_numeric_dtype(series):
-        return DataType.INTEGER if np.all(np.mod(s.astype(float), 1) == 0) else DataType.FLOAT
+        finite = s.astype(float)
+        finite = finite[np.isfinite(finite)]
+        return DataType.INTEGER if whole_numbers(finite) else DataType.FLOAT
 
     as_str = s.astype(str).str.strip()
     lowered = as_str.str.lower()
@@ -41,7 +50,8 @@ def infer_dtype(series: pd.Series) -> DataType:
     nums = pd.to_numeric(_clean_numeric_strings(as_str), errors="coerce")
     if nums.notna().mean() >= NUMERIC_RATIO:
         ok = nums.dropna()
-        return DataType.INTEGER if np.all(np.mod(ok, 1) == 0) else DataType.FLOAT
+        ok = ok[np.isfinite(ok)]
+        return DataType.INTEGER if whole_numbers(ok) else DataType.FLOAT
 
     looks_temporal = as_str.str.contains(r"\d[-/:T]\d", regex=True).mean() >= DATETIME_RATIO
     if looks_temporal:
@@ -84,6 +94,7 @@ def infer_schema(
             present = s.dropna()
             if dtype.is_numeric:
                 nums = pd.to_numeric(_clean_numeric_strings(present), errors="coerce").dropna()
+                nums = nums[np.isfinite(nums.astype(float))]
                 if len(nums) and nums.min() >= 0:
                     fld.min = 0
             elif dtype == DataType.CATEGORICAL and present.nunique() <= 20:
@@ -158,9 +169,12 @@ def profile_column(series: pd.Series, dtype: DataType | None = None) -> ColumnPr
         nums = pd.to_numeric(_clean_numeric_strings(series), errors="coerce")
         prof.invalid = int((series.notna() & nums.isna()).sum())
         x = nums.dropna().astype(float)
+        prof.invalid += int(np.isinf(x).sum())
+        x = x[np.isfinite(x)]
         if len(x):
             q = np.percentile(x, [25, 50, 75])
-            prof.mean, prof.std = float(x.mean()), float(x.std(ddof=0))
+            with np.errstate(over="ignore", invalid="ignore"):
+                prof.mean, prof.std = float(x.mean()), float(x.std(ddof=0))
             prof.min, prof.max = float(x.min()), float(x.max())
             prof.p25, prof.median, prof.p75 = (float(v) for v in q)
     elif dtype == DataType.DATETIME:

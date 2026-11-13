@@ -35,12 +35,18 @@ from anomalyguard.schema.validator import SchemaValidator, ValidationReport
 
 log = logging.getLogger("anomalyguard.pipeline")
 
+#: earlier rows kept for incremental runs (``detection.reference_rows``)
+DEFAULT_REFERENCE_ROWS = 5000
+#: batches smaller than this are unreliable to fit detectors on by themselves
+SMALL_BATCH = 30
+
 
 @dataclass
 class PipelineResult:
     name: str
     status: str  # success | empty | failed
-    run_id: int | None = None
+    run_id: int | None = None  # global id in the metrics database (None without monitoring)
+    run_number: int | None = None  # this pipeline's own run sequence (1, 2, 3, ...)
     metrics: dict[str, Any] = field(default_factory=dict)
     report: AnomalyReport | None = None
     remediation: RemediationResult | None = None
@@ -61,6 +67,7 @@ class PipelineResult:
             "name": self.name,
             "status": self.status,
             "run_id": self.run_id,
+            "run_number": self.run_number,
             "metrics": self.metrics,
             "alerts": [a.to_dict() for a in self.alerts],
             "outputs": self.outputs,
@@ -131,7 +138,14 @@ class PipelineExecutor:
         cfg = self.config
         t0 = time.perf_counter()
         run_id = self.store.start_run(cfg.name) if self.store else None
-        result = PipelineResult(name=cfg.name, status="success", run_id=run_id)
+        run_number = (
+            self.store.run_number(run_id)
+            if self.store and run_id is not None
+            else int(self.state.get(cfg.name).get("run_count", 0)) + 1
+        )
+        result = PipelineResult(
+            name=cfg.name, status="success", run_id=run_id, run_number=run_number
+        )
         try:
             self._run(result)
         except Exception as exc:
@@ -151,7 +165,11 @@ class PipelineExecutor:
                 pass
         result.duration_ms = (time.perf_counter() - t0) * 1000
         result.metrics["duration_ms"] = round(result.duration_ms, 1)
-        result.metrics["alerts_sent"] = sum(1 for a in result.alerts if a.status == "sent")
+        # alerts delivered on at least one channel; failed deliveries are counted apart
+        result.metrics["alerts_sent"] = sum(1 for a in result.alerts if a.delivered)
+        result.metrics["alerts_failed"] = sum(
+            1 for a in result.alerts if a.status in ("failed", "partial")
+        )
         if self.store and run_id is not None:
             detectors = (
                 {r.detector: r.n_anomalies for r in result.report.results} if result.report else {}
@@ -172,6 +190,36 @@ class PipelineExecutor:
         )
         return result
 
+    # -- reference window for incremental runs ----------------------------
+    @property
+    def _reference_path(self) -> Path:
+        return self.state.dir / f"{self.config.name}.reference.jsonl"
+
+    def _reference_rows(self) -> int:
+        if not self.config.state.get("incremental", False):
+            return 0
+        return int((self.config.detection or {}).get("reference_rows", DEFAULT_REFERENCE_ROWS))
+
+    def _load_reference(self) -> pd.DataFrame | None:
+        path = self._reference_path
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+        try:
+            ref = pd.read_json(path, lines=True, dtype=False, convert_dates=False)
+        except ValueError:
+            log.warning("ignoring unreadable reference rows in %s", path)
+            return None
+        return ref if not ref.empty else None
+
+    def _save_reference(self, reference: pd.DataFrame | None, batch: pd.DataFrame, n: int) -> None:
+        rows = batch if reference is None else pd.concat([reference, batch], ignore_index=True)
+        rows = rows.tail(n)
+        self.state.dir.mkdir(parents=True, exist_ok=True)
+        text = rows.to_json(orient="records", lines=True, date_format="iso", default_handler=str)
+        tmp = self._reference_path.with_suffix(".tmp")
+        tmp.write_text(text if text.endswith("\n") or not text else text + "\n", encoding="utf-8")
+        tmp.replace(self._reference_path)
+
     def _run(self, result: PipelineResult) -> None:
         cfg = self.config
         df = self._read()
@@ -181,7 +229,16 @@ class PipelineExecutor:
             result.metrics.update(n_anomalies=0, anomaly_rate=0.0)
             return
 
-        schema = self._schema(df)
+        # Incremental runs only see the new rows. Detectors are fitted on a
+        # bounded window of earlier rows plus the new ones, and only the new
+        # rows are reported, so a 3-row batch is judged against history.
+        keep_reference = self._reference_rows()
+        reference = self._load_reference() if keep_reference > 0 else None
+        if reference is not None:
+            reference = reference.reindex(columns=df.columns)
+        combined = df if reference is None else pd.concat([reference, df], ignore_index=True)
+
+        schema = self._schema(combined)
         result.schema = schema
         validation = SchemaValidator(schema).validate(df)
         quality = compute_quality(df, schema, validation)
@@ -189,7 +246,18 @@ class PipelineExecutor:
 
         det = cfg.detection or {}
         multipliers = self.store.thresholds() if self.store else None
-        coerced = validation.coerced if validation.coerced is not None else df
+        notes: list[str] = []
+        if reference is None:
+            coerced = validation.coerced if validation.coerced is not None else df
+            if cfg.state.get("incremental", False) and len(df) < SMALL_BATCH:
+                notes.append(
+                    f"only {len(df)} new rows and no reference rows from earlier runs: "
+                    "detectors were fitted on this batch alone, so results are unreliable"
+                    + ("" if keep_reference else " (detection.reference_rows is 0)")
+                )
+        else:
+            full = SchemaValidator(schema).validate(combined).coerced
+            coerced = full if full is not None else combined
         report = run_detectors(
             coerced,
             cfg.detectors,
@@ -200,8 +268,18 @@ class PipelineExecutor:
             min_votes=int(det.get("min_votes", 1)),
             threshold_multipliers=multipliers,
         )
+        if reference is not None:
+            report = report.tail(len(reference))
+            result.metrics["reference_rows"] = len(reference)
+        for note in notes:
+            log.warning("[%s] %s", cfg.name, note)
+        report.warnings.extend(notes)
+        if report.warnings:
+            result.metrics["warnings"] = list(report.warnings)
         report.index = list(df.index)
         result.report = report
+        if keep_reference > 0:
+            self._save_reference(reference, df, keep_reference)
 
         remediation = None
         if cfg.remediation is not None and cfg.remediation.get("enabled", True):

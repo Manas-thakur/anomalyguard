@@ -50,11 +50,11 @@ class JobContext:
     def __init__(self, manager: JobManager, job_id: str):
         self.manager = manager
         self.job_id = job_id
+        self.fraction = 0.0
 
     def progress(self, fraction: float, message: str | None = None) -> None:
-        self.manager._update(
-            self.job_id, progress=max(0.0, min(1.0, float(fraction))), message=message
-        )
+        self.fraction = max(0.0, min(1.0, float(fraction)))
+        self.manager._update(self.job_id, progress=self.fraction, message=message)
 
 
 class JobManager:
@@ -132,8 +132,9 @@ class JobManager:
 
     def _run(self, job_id: str, fn: Callable[[JobContext], Any]) -> None:
         self._update(job_id, status="running", started_at=now_iso())
+        ctx = JobContext(self, job_id)
         try:
-            result = fn(JobContext(self, job_id))
+            result = fn(ctx)
         except Exception as exc:
             log.debug("job %s failed:\n%s", job_id, traceback.format_exc())
             self._update(
@@ -141,9 +142,19 @@ class JobManager:
                 status="failed",
                 finished_at=now_iso(),
                 error=f"{type(exc).__name__}: {exc}",
+                message="Failed",
             )
             return
-        self._update(job_id, status="success", finished_at=now_iso(), progress=1.0, result=result)
+        # a job that did not report its own completion must not keep "Running..."
+        message = None if ctx.fraction >= 1.0 else "Done"
+        self._update(
+            job_id,
+            status="success",
+            finished_at=now_iso(),
+            progress=1.0,
+            result=result,
+            message=message,
+        )
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with closing(self._conn()) as conn:

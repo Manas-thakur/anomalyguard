@@ -23,7 +23,7 @@ from anomalyguard.remediate.strategies import (
     Winsorize,
     normalise_categories,
 )
-from anomalyguard.schema.coercion import is_missing
+from anomalyguard.schema.coercion import coerce_series, is_missing, whole_numbers
 from anomalyguard.schema.registry import DataType, Schema
 
 MISSING_ACTIONS = {
@@ -68,6 +68,12 @@ class ColumnPolicy:
             raise ValueError(f"outlier policy must be one of {sorted(OUTLIER_ACTIONS)}")
         if self.invalid not in INVALID_ACTIONS:
             raise ValueError(f"invalid policy must be one of {sorted(INVALID_ACTIONS)}")
+        if self.outlier == "clip" and self.min is None and self.max is None:
+            raise ValueError("outlier: clip needs a range: set min and/or max (CLI: --min/--max)")
+        if self.missing == "constant" and self.constant is None:
+            raise ValueError(
+                "missing: constant needs a fill value: set constant (CLI: --missing-value)"
+            )
 
     @classmethod
     def from_dict(
@@ -116,6 +122,7 @@ class FlaggedItem:
     suggestion_confidence: float | None = None
     suggestion_rationale: str | None = None
     detector: str | None = None  # detector name, or the problem kind (missing, type, schema)
+    applied: bool = False  # the suggestion was written to the output (LLM auto_apply)
 
     def to_dict(self) -> dict[str, Any]:
         v = self.value
@@ -134,6 +141,7 @@ class FlaggedItem:
             "suggestion_confidence": self.suggestion_confidence,
             "suggestion_rationale": self.suggestion_rationale,
             "detector": self.detector,
+            "applied": self.applied,
         }
 
 
@@ -195,10 +203,15 @@ class RemediationPipeline:
         changes: list[Change] = []
         dropped: dict[int, str] = {}
         flagged: list[FlaggedItem] = []
+        # cells sent to review keep their value: later steps must not rewrite them,
+        # so the review item and the output agree
+        self._protected: set[tuple[int, str]] = set()
 
         def flag(row: int, column: str | None, reason: str, detector: str | None = None) -> None:
             value = work.iloc[row][column] if column else None
             flagged.append(FlaggedItem(row, index[row], column, value, reason, detector=detector))
+            if column is not None:
+                self._protected.add((row, column))
 
         # 1. duplicates
         if self.policy.dedupe:
@@ -245,7 +258,24 @@ class RemediationPipeline:
                 mask = mask_df[col].to_numpy() & work[col].notna().to_numpy()
                 if not mask.any():
                     continue
-                changes.extend(self._fix_outliers(work, col, mask, reasons, flag, dropped, sources))
+                group_cols = report.group_columns(col)
+                groups = None
+                if group_cols and all(g in work.columns for g in group_cols):
+                    groups = work[group_cols].astype(str).agg("|".join, axis=1)
+                changes.extend(
+                    self._fix_outliers(
+                        work,
+                        col,
+                        mask,
+                        reasons,
+                        flag,
+                        dropped,
+                        sources,
+                        dtype=dtypes[col],
+                        groups=groups,
+                        group_label="/".join(group_cols or []),
+                    )
+                )
             for r in report.rows_without_column():
                 row_findings = [f for f in report.findings if f.row == r]
                 reason = "; ".join(f.reason for f in row_findings)
@@ -266,18 +296,19 @@ class RemediationPipeline:
                 continue
             changes.extend(self._fix_missing(work, col, mask, dtypes[col], flag, dropped))
 
+        if self.llm is not None and flagged:
+            changes.extend(self._llm_suggest(work, flagged))
+
+        changes = _merge_cells(changes)
         for ch in changes:
             ch.index = index[ch.row]
         flagged_rows = {f.row for f in flagged}
-
-        if self.llm is not None and flagged:
-            changes.extend(self._llm_suggest(work, flagged))
 
         # restore integer columns that became float during fixing
         for col, dt in dtypes.items():
             if dt == DataType.INTEGER and pd.api.types.is_float_dtype(work[col]):
                 vals = work[col].dropna()
-                if len(vals) and np.all(np.mod(vals, 1) == 0):
+                if len(vals) and whole_numbers(vals):
                     work[col] = work[col].astype("Int64")
 
         if self.policy.flag_column:
@@ -288,7 +319,19 @@ class RemediationPipeline:
         return RemediationResult(out, original, changes, dropped, flagged)
 
     # ------------------------------------------------------------------
-    def _fix_outliers(self, work, col, mask, reasons, flag, dropped, sources=None) -> list[Change]:
+    def _fix_outliers(
+        self,
+        work,
+        col,
+        mask,
+        reasons,
+        flag,
+        dropped,
+        sources=None,
+        dtype: DataType | None = None,
+        groups: pd.Series | None = None,
+        group_label: str = "",
+    ) -> list[Change]:
         pol = self.policy.for_column(col)
         action = pol.outlier
         rows = np.flatnonzero(mask)
@@ -304,24 +347,41 @@ class RemediationPipeline:
             for r in rows.tolist():
                 dropped.setdefault(r, f"outlier in {col}: {why[r]}")
             return []
-        if not pd.api.types.is_numeric_dtype(work[col]):
+        numeric_col = pd.api.types.is_numeric_dtype(work[col]) and not pd.api.types.is_bool_dtype(
+            work[col]
+        )
+        if not numeric_col and not (dtype is not None and dtype.is_numeric):
             for r in rows.tolist():
                 flag(r, col, why[r], src[r])
             return []
+        # Strategies work on a numeric copy, so a column whose unparseable cells
+        # were kept as text (invalid: drop/flag/keep) still gets its outliers fixed;
+        # only the changed cells are written back.
+        target = work
+        if not numeric_col:
+            target = pd.DataFrame(
+                {col: coerce_series(work[col], DataType.FLOAT)[0].astype(float)}
+            ).reset_index(drop=True)
         strategy: Strategy
         if action == "cap":
-            strategy = Cap(pol.cap_k)
+            strategy = Cap(pol.cap_k, groups=groups, group_label=group_label or "group")
+            if self.schema is not None and col in self.schema.fields:
+                fmin = self.schema.fields[col].min
+                if isinstance(fmin, (int, float)) and fmin >= 0:
+                    strategy.non_negative = True
         elif action == "winsorize":
             strategy = Winsorize()
         elif action == "clip":
             strategy = Clip(pol.min, pol.max)
         elif action in ("median", "mean"):
-            out = SetNull().apply(work, col, mask, "outlier replaced")
-            out += Impute(action).apply(work, col, mask, "outlier replaced")
-            return _merge_chain(out)
+            out = SetNull().apply(target, col, mask, "outlier replaced")
+            out += Impute(action, groups=groups).apply(target, col, mask, "outlier replaced")
+            return self._write_back(work, target, col, _merge_chain(out))
         else:  # null
-            return SetNull().apply(work, col, mask, "outlier removed")
-        changes = strategy.apply(work, col, mask)
+            return self._write_back(
+                work, target, col, SetNull().apply(target, col, mask, "outlier removed")
+            )
+        changes = self._write_back(work, target, col, strategy.apply(target, col, mask))
         changed = {c.row for c in changes}
         for c in changes:
             c.reason = f"{c.reason}; detected: {why[c.row]}"
@@ -334,6 +394,17 @@ class RemediationPipeline:
                 flag(r, col, f"{why[r]} ({note})", src[r])
         return changes
 
+    @staticmethod
+    def _write_back(work, target, col, changes: list[Change]) -> list[Change]:
+        """Copy changed cells from a numeric working copy into ``work``."""
+        if target is work:
+            return changes
+        pos = work.columns.get_loc(col)
+        for c in changes:
+            c.before = work.iat[c.row, pos]
+            work.iat[c.row, pos] = c.after
+        return changes
+
     def _fix_constraints(self, work, flag) -> list[Change]:
         changes: list[Change] = []
         assert self.schema is not None
@@ -341,11 +412,16 @@ class RemediationPipeline:
             if col not in work.columns:
                 continue
             pol = self.policy.for_column(col)
+            protected = np.array(
+                [(r, col) in self._protected for r in range(len(work))], dtype=bool
+            )
+            if fld.dtype == DataType.DATETIME and (fld.min is not None or fld.max is not None):
+                self._flag_date_range(work, col, fld, protected, flag)
             if fld.dtype.is_numeric and (fld.min is not None or fld.max is not None):
                 nums = pd.to_numeric(work[col], errors="coerce")
                 lo = fld.min if fld.min is not None else -np.inf
                 hi = fld.max if fld.max is not None else np.inf
-                mask = ((nums < lo) | (nums > hi)).to_numpy()
+                mask = ((nums < lo) | (nums > hi)).to_numpy() & ~protected
                 if mask.any():
                     if pol.outlier in ("flag", "keep"):
                         for r in np.flatnonzero(mask).tolist():
@@ -361,27 +437,79 @@ class RemediationPipeline:
                         )
             if fld.allowed:
                 changes.extend(normalise_categories(work, col, fld.allowed))
-                bad = work[col].notna() & ~work[col].isin(fld.allowed)
+                bad = work[col].notna() & ~work[col].isin(fld.allowed) & ~protected
                 for r in np.flatnonzero(bad.to_numpy()).tolist():
                     flag(r, col, f"{work[col].iloc[r]!r} not an allowed value", "schema")
         return changes
 
+    @staticmethod
+    def _flag_date_range(work, col, fld, protected, flag) -> None:
+        """Dates outside the schema range go to review: a wrong date cannot be
+        repaired by clipping without inventing one."""
+        from anomalyguard.schema.validator import _now_like
+
+        ts = work[col]
+        if not pd.api.types.is_datetime64_any_dtype(ts):
+            ts = pd.to_datetime(ts, errors="coerce", format="mixed")
+        present = ts.notna().to_numpy() & ~protected
+        if fld.max is not None:
+            if str(fld.max).strip().lower() == "now":
+                hi = _now_like(ts) + pd.Timedelta(days=1)
+                why = "date is in the future"
+            else:
+                hi = pd.Timestamp(fld.max)
+                why = f"date after the schema maximum {fld.max}"
+            for r in np.flatnonzero(present & (ts > hi).to_numpy()).tolist():
+                flag(r, col, f"{work[col].iloc[r]} - {why}", "schema")
+        if fld.min is not None:
+            lo = pd.Timestamp(fld.min)
+            for r in np.flatnonzero(present & (ts < lo).to_numpy()).tolist():
+                flag(
+                    r,
+                    col,
+                    f"{work[col].iloc[r]} - date before the schema minimum {fld.min}",
+                    "schema",
+                )
+
+    def _id_like(self, col: str) -> bool:
+        if _is_id_like(col):
+            return True
+        if self.schema is None:
+            return False
+        fld = self.schema.fields.get(col)
+        return bool(fld is not None and fld.unique) or col in (self.schema.primary_key or [])
+
     def _fix_missing(self, work, col, mask, dtype, flag, dropped) -> list[Change]:
         pol = self.policy.for_column(col)
         action = pol.missing
+        note = ""
         if action == "auto":
-            if _is_id_like(col) or dtype in (DataType.STRING, DataType.DATETIME, DataType.UNKNOWN):
+            if self._id_like(col) or dtype in (
+                DataType.STRING,
+                DataType.DATETIME,
+                DataType.UNKNOWN,
+            ):
                 action = "flag"
             elif dtype.is_numeric:
                 action = "median"
             else:
                 action = "mode"
+        elif action not in ("keep", "flag", "drop"):
+            # Identifiers are never invented, and numeric fills do not apply to
+            # text, categories or dates: those cells go to review instead.
+            if self._id_like(col):
+                action, note = "flag", f" (identifier column: not filled by {pol.missing})"
+            elif action in ("mean", "median", "interpolate") and not dtype.is_numeric:
+                action, note = (
+                    "flag",
+                    f" ({pol.missing} needs a numeric column; {col} is {dtype.value})",
+                )
         if action == "keep":
             return []
         rows = np.flatnonzero(mask)
         if action == "flag":
             for r in rows.tolist():
-                flag(r, col, "missing value", "missing")
+                flag(r, col, f"missing value{note}", "missing")
             return []
         if action == "drop":
             for r in rows.tolist():
@@ -408,6 +536,7 @@ class RemediationPipeline:
             if self.llm_auto_apply and sug.confidence >= self.llm_min_confidence:
                 before = work.iloc[item.row][item.column]
                 work.iloc[item.row, work.columns.get_loc(item.column)] = sug.value
+                item.applied = True
                 changes.append(
                     Change(
                         item.row,
@@ -421,6 +550,27 @@ class RemediationPipeline:
                     )
                 )
         return changes
+
+
+def _merge_cells(changes: list[Change]) -> list[Change]:
+    """One record per cell: when several steps changed the same cell (e.g. a cap
+    and then a schema clip), keep the original value as ``before``, the final
+    value as ``after`` and name every strategy."""
+    merged: dict[tuple[int, str | None], Change] = {}
+    out: list[Change] = []
+    for c in changes:
+        key = (c.row, c.column)
+        if c.column is None or key not in merged:
+            merged[key] = c
+            out.append(c)
+            continue
+        first = merged[key]
+        first.after = c.after
+        if c.strategy not in first.strategy.split("+"):
+            first.strategy = f"{first.strategy}+{c.strategy}"
+        first.reason = f"{first.reason}; then {c.reason}" if c.reason else first.reason
+        first.confidence = min(first.confidence, c.confidence)
+    return out
 
 
 def _merge_chain(changes: list[Change]) -> list[Change]:

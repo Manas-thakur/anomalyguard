@@ -10,10 +10,51 @@ received since a detector's last adjustment is considered.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from anomalyguard.monitor.store import MetricsStore
+
+_GROUPED = re.compile(r"^grouped\((?P<base>.+?) by .+\)$")
+_ENSEMBLE = re.compile(r"^ensemble\[(?:mean|max|vote|weighted)\]\((?P<members>.*)\)$")
+
+
+def resolve_detector(name: str, store: MetricsStore | None = None) -> str:
+    """Normalise a detector name given for feedback or a threshold.
+
+    Accepts registry names and aliases (``tukey`` -> ``iqr``), ``grouped`` /
+    ``ensemble`` and the composite names runs record, such as
+    ``grouped(mad by region)``, plus any name already stored in ``store``.
+    Raises ``KeyError`` with the list of known names otherwise.
+    """
+    from anomalyguard.detect.registry import DETECTORS, canonical_name
+
+    raw = str(name or "").strip()
+    if not raw:
+        raise KeyError("detector name is empty")
+    try:
+        return canonical_name(raw)
+    except KeyError:
+        pass
+    if raw in ("grouped", "ensemble"):
+        return raw
+    if store is not None and raw in store.detector_names():
+        return raw
+    m = _GROUPED.match(raw)
+    if m:
+        try:
+            canonical_name(m.group("base"))
+            return raw
+        except KeyError:
+            pass
+    m = _ENSEMBLE.match(raw)
+    if m:
+        return raw
+    raise KeyError(
+        f"Unknown detector '{raw}'. Use one of: {', '.join(sorted(DETECTORS))}, "
+        "a grouped/ensemble name such as 'grouped(mad by region)', or a name shown in a run"
+    )
 
 
 @dataclass
@@ -62,6 +103,8 @@ class FeedbackLoop:
             row_index = a["row_index"]
         if not detector:
             raise ValueError("feedback needs a detector or an anomaly_id")
+        if anomaly_id is None:
+            detector = resolve_detector(detector, self.store)
         return self.store.add_feedback(detector, label, run_id, anomaly_id, row_index, column, note)
 
     def mark_false_positive(self, **kw: Any) -> int:

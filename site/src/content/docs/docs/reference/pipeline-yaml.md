@@ -104,6 +104,8 @@ Required mapping. `type` is one of `csv`, `tsv`, `json`, `jsonl`, `ndjson`, `par
 | `path` / `url` | | File path, SQLite file or SQLAlchemy URL (`url` for `sql` and `rest`) |
 | `cursor` | | Column whose largest value is remembered for incremental reads |
 | `max_rows` | all | Read at most this many rows (non-incremental runs) |
+| `na_values` | none | CSV: extra cell values read as missing (only empty cells are missing by default, so `NA` stays text) |
+| `delimiter`, `encoding`, `decimal` | sniffed / detected | CSV format overrides (see [How CSV files are read](/anomalyguard/docs/concepts/sources/#how-csv-files-are-read)) |
 | `name` | pipeline name | Overridden by the pipeline name |
 
 ## schema
@@ -127,7 +129,8 @@ A list of detector names or specs (or a comma-separated string). Default `[mad, 
 |---|---|---|
 | `combine` | `any` | `any`, `vote` or `all`: when a row counts as anomalous |
 | `min_votes` | `1` | For `vote` |
-| `time_column` | | Sort by this column before detection (time-series detectors); results map back to the original order |
+| `time_column` | | Sort by this column before detection; results map back to the original order. Time-series detectors run on a regular time grid: gaps in the timestamps are filled with empty points (with a warning) so seasonal phases and windows follow the clock |
+| `reference_rows` | `5000` | With `state.incremental`: earlier rows kept as a reference window. Detectors are fitted on these rows plus the new batch and only the new rows are reported. `0` fits on the new batch alone |
 | `columns` | | Applied to detector specs that do not set `columns` |
 | `group_by` | | Applied to detector specs that do not set `group_by` |
 
@@ -215,7 +218,7 @@ Optional. Nothing is written without it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `incremental` | `false` | Resume from the last checkpoint / watermark and read only new rows |
+| `incremental` | `false` | Resume from the last checkpoint / watermark and read only new rows. Detection compares the new rows with `detection.reference_rows` earlier rows, stored as `<name>.reference.jsonl` in `dir` |
 | `dir` | `.anomalyguard/state` (in the working directory) | Checkpoints, run counters, alert history |
 
 ## schedule
@@ -226,3 +229,5 @@ Used by `anomalyguard run --schedule`.
 |---|---|
 | `every` | Interval: `30s`, `5m`, `2h`, `1d` or plain seconds |
 | `interval_seconds` | Interval in seconds (takes precedence over `every`) |
+
+Both are checked when the file is loaded: a value that is not a duration, or is not positive, makes the file invalid (for example `schedule.every: invalid duration 'banana' (use e.g. 30s, 5m, 2h, 1d)`), so `run`, `doctor` and the web app report it even when the pipeline is not run on a schedule.

@@ -37,6 +37,6 @@ Each notifier has a `min_severity` and only receives alerts at or above it. Befo
 
 The limiter's history is saved per pipeline under `.anomalyguard/state/`, so it works across separate `anomalyguard run` processes. Set `rate_limit: false` to turn it off.
 
-Every alert is recorded with the run, with a status of `sent`, `duplicate`, `rate_limited`, `failed` (no notifier delivered it) or `filtered` (no notifier accepts that severity). The web app shows them on the run's **Alerts** tab.
+Every alert is recorded with the run, with a status of `sent` (every channel delivered it), `partial` (some channels did), `failed` (none did), `duplicate`, `rate_limited` or `filtered` (no notifier accepts that severity). `channels` lists the channels that delivered it and `deliveries` has one `{channel, ok, error}` entry per channel tried, so a broken webhook is visible instead of silent; failures are also logged as warnings. The web app shows them, with each failed channel's error, in the run's **Alerts** section.
 
 See [Alerts and notifiers](/anomalyguard/docs/guides/alerts/) for the console, file, webhook, Slack and email notifiers.

@@ -37,6 +37,28 @@ What the results show:
 - On a seasonal series, the seasonal residual catches point and contextual anomalies, and CUSUM catches sustained shifts and drift. Combined with `max`, they recover 99% of the anomalous points.
 - Isolation Forest is the weakest on `tabular`: its axis-parallel splits fit strongly correlated features poorly.
 
+## Reproduce the best configurations from the CLI
+
+`demo generate` writes the same data as the benchmark (seed 42), and `--param` sets detector parameters:
+
+```bash
+anomalyguard demo generate -d tabular -n 2000 -o tabular.csv
+anomalyguard detect tabular.csv -m lof
+# P 0.81, R 0.88, F1 0.84
+
+anomalyguard demo generate -d orders -n 2000 -o orders.csv
+anomalyguard detect orders.csv -m mad --group-by region --columns quantity,unit_price,delivery_days
+# P 0.81, R 1.00, F1 0.90
+
+anomalyguard demo generate -d sensor -o sensor.csv
+anomalyguard detect sensor.csv --columns temperature --time-column timestamp -m ensemble \
+    --param 'ensemble.detectors=[{method: seasonal, period: 24}, {method: cusum, period: 24}]' \
+    --param ensemble.combine=max
+# P 0.89, R 0.99, F1 0.94
+```
+
+Scoring `detect -o report.json` against the `*_labels.csv` ground truth (counting the anomaly types listed for each dataset above) gives the numbers in the comments. For the sensor data, `-m seasonal,cusum --param cusum.period=24` (two detectors, combined with `any`) flags the same rows.
+
 ## Full output
 
 Seed 42. Precision/recall/F1 at each detector's default threshold; ROC-AUC from raw scores.
@@ -49,7 +71,7 @@ Seed 42. Precision/recall/F1 at each detector's default threshold; ROC-AUC from 
 | mad | 0.91 | 0.50 | 0.65 | 0.804 | 0.00 | 1.00 | 0.00 |
 | iqr | 0.52 | 0.51 | 0.51 | 0.803 | 0.02 | 1.00 | 0.00 |
 | grubbs | 1.00 | 0.50 | 0.67 | 0.804 | 0.00 | 1.00 | 0.01 |
-| iforest | 0.24 | 0.27 | 0.26 | 0.828 | 0.00 | 0.54 | 0.13 |
+| iforest | 0.24 | 0.27 | 0.26 | 0.828 | 0.00 | 0.54 | 0.14 |
 | lof | 0.81 | 0.88 | 0.84 | 0.975 | 0.76 | 1.00 | 0.04 |
 | knn | 0.92 | 0.70 | 0.80 | 0.959 | 0.40 | 1.00 | 0.02 |
 | `ensemble[vote](mad+lof+knn)` | 0.92 | 0.70 | 0.80 | 0.937 | 0.40 | 1.00 | 0.06 |
@@ -61,8 +83,8 @@ Seed 42. Precision/recall/F1 at each detector's default threshold; ROC-AUC from 
 | zscore | 1.00 | 0.51 | 0.68 | 0.871 | 0.00 | 0.90 | 0.00 |
 | mad | 0.71 | 0.57 | 0.63 | 0.943 | 0.00 | 1.00 | 0.00 |
 | iqr | 0.45 | 0.60 | 0.52 | 0.899 | 0.07 | 1.00 | 0.00 |
-| iforest | 0.66 | 0.60 | 0.63 | 0.922 | 0.07 | 1.00 | 0.13 |
-| lof | 0.18 | 0.60 | 0.27 | 0.799 | 0.07 | 1.00 | 0.03 |
+| iforest | 0.66 | 0.60 | 0.63 | 0.922 | 0.07 | 1.00 | 0.16 |
+| lof | 0.18 | 0.60 | 0.27 | 0.799 | 0.07 | 1.00 | 0.04 |
 | mad by region | 0.81 | 1.00 | 0.90 | 1.000 | 1.00 | 1.00 | 0.01 |
 | iqr by region | 0.50 | 1.00 | 0.66 | 1.000 | 1.00 | 1.00 | 0.01 |
 
@@ -72,11 +94,11 @@ Seed 42. Precision/recall/F1 at each detector's default threshold; ROC-AUC from 
 |---|---|---|---|---|---|---|---|---|---|
 | zscore | 1.00 | 0.01 | 0.01 | 0.595 | 0.00 | 0.00 | 0.00 | 0.10 | 0.00 |
 | mad | 0.00 | 0.00 | 0.00 | 0.584 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
-| rolling_zscore(window=6) | 0.18 | 0.19 | 0.18 | 0.545 | 0.04 | 0.38 | 0.14 | 0.90 | 0.01 |
+| rolling_zscore(window=6) | 0.44 | 0.10 | 0.16 | 0.542 | 0.00 | 0.38 | 0.04 | 0.80 | 0.00 |
 | ewma(span=3) | 0.47 | 0.13 | 0.20 | 0.560 | 0.04 | 0.62 | 0.04 | 0.90 | 0.01 |
 | seasonal(period=24) | 1.00 | 0.23 | 0.37 | 0.657 | 0.67 | 1.00 | 0.00 | 1.00 | 0.00 |
 | cusum(period=24) | 0.88 | 0.87 | 0.87 | 0.994 | 0.92 | 0.00 | 1.00 | 0.00 | 0.01 |
-| iforest | 0.59 | 0.41 | 0.48 | 0.702 | 0.12 | 0.25 | 0.43 | 1.00 | 0.16 |
+| iforest | 0.59 | 0.41 | 0.48 | 0.702 | 0.12 | 0.25 | 0.43 | 1.00 | 0.17 |
 | `ensemble[max](seasonal+cusum)` | 0.89 | 0.99 | 0.94 | 0.997 | 0.96 | 1.00 | 1.00 | 1.00 | 0.01 |
 
 ### Data-quality checks (schema validation on `orders`)
@@ -86,4 +108,3 @@ Seed 42. Precision/recall/F1 at each detector's default threshold; ROC-AUC from 
 | missing | 20 | 20 | 1.00 |
 | type_error | 10 | 10 | 1.00 |
 | duplicate | 20 | 20 | 1.00 |
-

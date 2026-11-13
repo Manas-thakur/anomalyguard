@@ -102,7 +102,7 @@ def test_init_and_run(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["run", "pipeline.yaml"]) == 0
     out = capsys.readouterr().out
-    assert "[orders] run #1" in out
+    assert "[orders] run 1 (#1)" in out
     assert Path("out/orders_clean.csv").exists()
     assert Path(".anomalyguard/anomalyguard.db").exists()
     assert main(["run", "pipeline.yaml", "--every", "1s", "--max-runs", "1", "--json"]) == 0
@@ -118,7 +118,7 @@ def test_run_examples_pipeline(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main(["run", "examples/pipeline.yaml", "examples/sensor_pipeline.yaml"]) == 0
     out = capsys.readouterr().out
-    assert "[orders_quality] run #1" in out and "[sensor_monitor] run #2" in out
+    assert "[orders_quality] run 1 (#1)" in out and "[sensor_monitor] run 1 (#2)" in out
     assert (tmp_path / "out" / "orders_clean.csv").exists()
 
 

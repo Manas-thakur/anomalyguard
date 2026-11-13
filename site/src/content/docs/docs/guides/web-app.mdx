@@ -61,7 +61,7 @@ All pipeline runs and analyses, newest first, filterable by source, status, kind
 
 ### Run detail
 
-A run opens on its **incidents**. Other tabs hold the sortable, paginated findings table (with feedback buttons), the remediation summary, the alerts that were sent and downloads of the run's outputs.
+A run opens on its **incidents**. Other tabs hold the sortable, paginated findings table (with feedback buttons), the remediation summary, the run's alerts (with a **Partly delivered** or **Delivery failed** badge and each failed channel's error when a notifier could not deliver) and downloads of the run's outputs.
 
 ### Incident triage
 
@@ -107,7 +107,7 @@ Lists the pipeline YAML files in the pipeline folders (`pipelines/` and `example
 - **Run now**: runs the pipeline as a background job and records it in the server's database; a notification links to the new run;
 - see its recent runs.
 
-**New pipeline** creates a file in the first pipeline folder from a template (`csv_quality`, `timeseries_monitor`, `database_quality`), pointing at a path or at an uploaded dataset.
+**New pipeline** creates a file in the first pipeline folder from a template (`csv_quality`, `timeseries_monitor`, `database_quality`), pointing at a path or at an uploaded dataset. Files that are not valid pipelines (a YAML error, a missing name or source, an unknown detector, a bad schedule) are still listed, marked invalid with the error.
 
 The web app runs pipelines on demand only; for schedules use `anomalyguard run --schedule` (see [Pipelines](/anomalyguard/docs/concepts/pipelines/#running-and-scheduling)).
 

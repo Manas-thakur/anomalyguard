@@ -237,7 +237,8 @@ export default function PipelineDetailPage() {
                   <li key={r.id}>
                     <Link to={`/runs/${r.id}`} className="hover:bg-muted/50 block space-y-1 px-4 py-2.5 outline-none focus-visible:bg-muted/60">
                       <span className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-medium">#{r.id}</span>
+                        <span className="font-mono text-sm font-medium">{r.run_number ? `run ${r.run_number}` : `#${r.id}`}</span>
+                        {r.run_number ? <span className="text-muted-foreground font-mono text-xs">#{r.id}</span> : null}
                         <StatusBadge status={r.status} />
                         <TimeAgo value={r.started_at} className="text-muted-foreground ml-auto text-xs" />
                       </span>

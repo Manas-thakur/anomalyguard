@@ -9,7 +9,7 @@ A **detector** learns what normal looks like from the data and scores every row.
 |---|---|---|
 | Statistical (univariate) | `zscore`, `mad`, `iqr`, `grubbs` | extreme values in one column |
 | Machine learning (multivariate) | `iforest`, `lof`, `knn` | rows whose combination of values is unusual |
-| Time series (univariate, ordered) | `rolling_zscore`, `ewma`, `seasonal`, `cusum` | spikes, values wrong for their place in a cycle, level shifts and drift |
+| Time series (univariate, ordered) | `rolling_zscore`, `ewma`, `seasonal`, `cusum`, `flatline` | spikes, values wrong for their place in a cycle, level shifts and drift, stuck (repeated) values |
 | Contextual | `grouped` | values unusual for their group (region, customer, sensor) |
 | Ensemble | `ensemble` | combinations of the above |
 
@@ -71,8 +71,11 @@ On the benchmark `orders` data, `mad` by region recalls all 30 contextual anomal
 | Correlated features where each value is in range but the combination is not | `lof` or `knn` |
 | An hourly or daily series with a cycle | `seasonal` with `period` set to the cycle length, plus `cusum` for shifts and drift |
 | A series without a cycle | `rolling_zscore` or `ewma` with a short window, plus `cusum` |
+| A sensor or feed that can freeze | add `flatline` (runs of identical values) |
 | Small samples from a roughly normal distribution | `grubbs` |
 
-Time-series detectors expect rows in time order. Pass `--time-column` (CLI), `time_column` (Python, analyses) or `detection.time_column` (pipelines) to sort first; findings are mapped back to the original row order.
+Time-series detectors expect rows in time order and evenly spaced. Pass `--time-column` (CLI), `time_column` (Python, analyses) or `detection.time_column` (pipelines): rows are sorted by time, and time-series detectors run on a regular grid where gaps in the timestamps become empty points (with a warning), so a missing day does not shift the seasonal phase. Findings are mapped back to the original row order. See [time series](/anomalyguard/docs/reference/detectors/#time-series).
+
+Log-normal-like columns (positive, right-skewed amounts or latencies) are scored on a log scale by the statistical detectors, so their long upper tail is not flagged wholesale; see [skewed columns](/anomalyguard/docs/reference/detectors/#statistical).
 
 `zscore` and `iqr` are fast but less robust: outliers inflate the mean and standard deviation that `zscore` measures against, so it under-detects on dirty data.

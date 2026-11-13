@@ -39,13 +39,25 @@ def _now_like(values: pd.Series) -> pd.Timestamp:
     return now.tz_convert(tz) if tz is not None else now.tz_localize(None)
 
 
+def _type_message(v: Any, dtype: DataType) -> str:
+    if dtype.is_numeric:
+        try:
+            if np.isinf(float(str(v).strip())):
+                return f"{v!r} is not a finite number"
+        except ValueError:
+            pass
+    return f"cannot convert {v!r} to {dtype.value}"
+
+
 def _jsonable(v: Any) -> Any:
     if v is None:
         return None
     if isinstance(v, (np.integer,)):
         return int(v)
     if isinstance(v, (np.floating, float)):
-        return None if np.isnan(v) else float(v)
+        if np.isnan(v):
+            return None
+        return float(v) if np.isfinite(v) else ("inf" if v > 0 else "-inf")
     if isinstance(v, (np.bool_,)):
         return bool(v)
     if isinstance(v, pd.Timestamp):
@@ -146,7 +158,7 @@ class SchemaValidator:
                 raw,
                 name,
                 "type",
-                lambda v, f=fld: f"cannot convert {v!r} to {f.dtype.value}",
+                lambda v, f=fld: _type_message(v, f.dtype),
             )
 
             if not fld.nullable:
@@ -277,4 +289,6 @@ class SchemaValidator:
         mask = mask.fillna(False).astype(bool).to_numpy()
         for row in np.flatnonzero(mask):
             v = raw.iloc[row]
+            if isinstance(v, np.generic):  # messages show 5, not np.int64(5)
+                v = v.item()
             report.errors.append(FieldError(int(row), column, rule, v, msg(v)))

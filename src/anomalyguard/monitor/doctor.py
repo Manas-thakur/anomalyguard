@@ -38,6 +38,18 @@ SECRET_VARS = {
 }
 
 
+REPO_URL = "https://github.com/Manas-thakur/anomalyguard"
+
+
+def install_command(extra: str | None = None, ref: str | None = None) -> str:
+    """pip command that installs this release from GitHub (the package is not on PyPI).
+
+    ``ref`` defaults to this version's tag; pass ``"main"`` for the latest code.
+    """
+    name = f"anomalyguard[{extra}]" if extra else "anomalyguard"
+    return f'pip install "{name} @ git+{REPO_URL}@{ref or "v" + __version__}"'
+
+
 def _installed(module: str) -> bool:
     return importlib.util.find_spec(module) is not None
 
@@ -46,7 +58,11 @@ def extras_status() -> dict[str, dict[str, Any]]:
     out = {}
     for extra, modules in EXTRAS.items():
         missing = [m for m in modules if not _installed(m)]
-        out[extra] = {"installed": not missing, "missing": missing}
+        out[extra] = {
+            "installed": not missing,
+            "missing": missing,
+            "install": install_command(extra),
+        }
     return out
 
 
@@ -114,6 +130,8 @@ def notifier_status(pipeline_files: list[Path]) -> list[dict[str, Any]]:
             continue
         notifiers = []
         for n in (cfg.alerts or {}).get("notifiers", []) or []:
+            if not isinstance(n, dict):
+                n = {"type": str(n)}
             kind = str(n.get("type", "console"))
             ok, detail = True, ""
             if kind in ("slack", "webhook"):
@@ -151,15 +169,28 @@ def collect(db_path: str | Path, pipeline_dirs: list[Path] | None = None) -> dic
     pipelines: list[dict[str, Any]] = []
     try:
         store = MetricsStore(db_path) if Path(db_path).exists() else None
-        catalog = PipelineCatalog(dirs, store, Path(db_path).parent)
+    except Exception:  # pragma: no cover - an unreadable database is reported by state_status
+        store = None
+    catalog = PipelineCatalog(dirs, store, Path(db_path).parent)
+    try:
         files = catalog.files()
-        for p in files:
-            d = catalog.describe(p)
-            pipelines.append(
-                {"name": d.get("name"), "file": str(p), "valid": d["valid"], "error": d["error"]}
-            )
     except Exception as exc:  # pragma: no cover - diagnostics must not crash
         pipelines.append({"name": None, "file": "", "valid": False, "error": str(exc)})
+    for p in files:
+        # one bad file must not hide the others (describe() reports, never raises)
+        try:
+            d = catalog.describe(p)
+        except Exception as exc:  # pragma: no cover - defensive
+            d = {"name": None, "valid": False, "error": f"{type(exc).__name__}: {exc}"}
+        pipelines.append(
+            {
+                "name": d.get("name"),
+                "file": str(p),
+                "valid": d["valid"],
+                "error": d["error"],
+                "warnings": d.get("warnings") or [],
+            }
+        )
     return {
         "version": __version__,
         "python": sys.version.split()[0],

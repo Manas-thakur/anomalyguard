@@ -33,11 +33,15 @@ detectors:
   - {method: ensemble, detectors: [mad, lof, knn], combine: vote, min_votes: 2}
 ```
 
-**Aliases**: `z`, `z_score` → `zscore`; `modified_zscore`, `robust_zscore` → `mad`; `tukey` → `iqr`; `isolation_forest`, `isolationforest` → `iforest`; `local_outlier_factor` → `lof`; `knn_distance` → `knn`; `rolling`, `moving_average` → `rolling_zscore`; `seasonal_decompose`, `stl` → `seasonal`; `changepoint`, `change_point` → `cusum`. Names are case-insensitive and `-` works as `_`.
+**Aliases**: `z`, `z_score` → `zscore`; `modified_zscore`, `robust_zscore` → `mad`; `tukey` → `iqr`; `isolation_forest`, `isolationforest` → `iforest`; `local_outlier_factor` → `lof`; `knn_distance` → `knn`; `rolling`, `moving_average` → `rolling_zscore`; `seasonal_decompose`, `stl` → `seasonal`; `changepoint`, `change_point` → `cusum`; `stuck`, `stuck_at`, `flat_line` → `flatline`. Names are case-insensitive and `-` works as `_`.
+
+On the CLI, set any parameter with `--param DETECTOR.KEY=VALUE` (repeatable), for example `--param seasonal.period=168 --param rolling_zscore.window=48`. Values are read as YAML, so `--param 'ensemble.detectors=[{method: seasonal, period: 24}, cusum]'` works too.
 
 ## Statistical
 
 Univariate: each column is scored on its own and findings name the column.
+
+**Skewed columns.** Amounts, sizes and latencies are usually right-skewed: on their original scale the long upper tail is full of ordinary values that a symmetric rule flags (on clean log-normal data `mad` flagged 6.8% and `iqr` 10.2% of rows). With `log_scale: auto` (the default for all four statistical detectors), a column is scored on a log scale when it looks log-normal: at least 30 values, at most 1% of them zero or negative (those are then scored as far below the range), clearly right-skewed (`(q95 - q50) / (q50 - q5)` of at least 1.5) and close to symmetric on the log scale (the same ratio of the logs between 1/1.15 and 1.15). Small whole-number counts (median below 20) and columns with fewer than 10 distinct values stay on the original scale, and so does a mixture of differently scaled groups (prices in several currencies), which stays lopsided on the log scale and where a log scale would hide a price typed ×20; use `group_by` for those. Reasons then quote the median and fences on the original scale and say "log scale". With these rules the benchmark datasets are unaffected, while on clean log-normal data `mad` flags 0.1% and `iqr` 2.2% of rows. Set `log_scale: false` (CLI `--no-log-scale`) to always use the original scale, or `true` to force the log scale for positive columns. The `cap` remediation strategy uses the same rule for its fences.
 
 ### zscore
 
@@ -111,11 +115,11 @@ Finds global outliers far from all other rows. Similar use to `lof`, and simpler
 
 ## Time series
 
-Univariate and order-dependent: rows must be in time order (use `time_column`). Findings name the column and give the expected value.
+Univariate and order-dependent: rows must be in time order and evenly spaced. Pass `time_column` (CLI `--time-column`): rows are sorted by time and the time-series detectors run on a **regular time grid**. The grid step is the median spacing of the timestamps; when the series has gaps, the missing points are inserted as empty values (detectors skip or interpolate them and never report them) and a warning gives the number and size of the gaps, so `period` and `window` count clock time rather than rows. Without the grid, a 12-hour gap in hourly data would shift every later point by 12 hours of seasonal phase. The grid is not used (with a warning) when timestamps repeat (several series in one column: use `group_by`), are not evenly spaced, or are so sparse that the grid would be more than four times longer than the data. Findings name the column and give the expected value.
 
 ### rolling_zscore
 
-`RollingZScoreDetector`. Deviation from a trailing window that excludes the current point. With `robust: true` the centre is the rolling median and the scale is the rolling IQR / 1.349, so earlier spikes do not mask later ones. Default threshold **4.0**.
+`RollingZScoreDetector`. Deviation from a trailing window that excludes the current point. With `robust: true` the centre is the rolling median and the scale is the rolling IQR / 1.349, so earlier spikes do not mask later ones. A window whose scale collapses below half the series' typical window scale (for example while a sensor repeats one value) uses the typical scale instead, so normal readings after a stuck period are not flagged; use `flatline` to catch the stuck period itself. Default threshold **4.0**.
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -158,6 +162,17 @@ Catches values that are normal overall but wrong for their place in the cycle, f
 | `period` | none | Remove this seasonal profile before standardising |
 
 Catches level shifts and drift. Best single detector for collective and drift anomalies on the `sensor` benchmark.
+
+### flatline
+
+`FlatlineDetector`. Stuck-at detection: the score of a point is the length of the run of identical consecutive values it belongs to, and runs longer than the threshold are flagged (every point of the run). By default the threshold is learned from the data: three times the 95th percentile of the column's run lengths, and at least `min_run`, so columns that legitimately repeat values (counts, rounded readings) are not flagged. A fixed `threshold` is a run length in points. Missing values break a run.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `min_run` | `5` | Smallest run length the learned threshold can have |
+| `tolerance` | `0` | Values within this distance of the run's first value count as equal |
+
+Catches a sensor or feed that keeps reporting its last value. On hourly IoT test data with a 30-hour stuck period it flagged all 30 stuck readings plus the reading they repeat, and nothing else.
 
 ## Wrappers
 
