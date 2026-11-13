@@ -11,13 +11,13 @@ AnomalyGuard is not on PyPI; pip installs it from GitHub. The commands below ins
 
 ```bash
 # library + CLI
-pip install "anomalyguard @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+pip install "anomalyguard @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 
 # with the web app, Parquet and SQLAlchemy support
-pip install "anomalyguard[server,parquet,sql] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+pip install "anomalyguard[server,parquet,sql] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 
 # everything
-pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 ```
 
 For the latest unreleased code, use `@main` instead of the tag:
@@ -53,10 +53,10 @@ anomalyguard doctor
 With [uv](https://docs.astral.sh/uv/) you can add AnomalyGuard to a project or run it as a tool:
 
 ```bash
-uv add "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+uv add "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 
 # or run the CLI without adding it to a project
-uvx --from "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0" anomalyguard serve
+uvx --from "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1" anomalyguard serve
 ```
 
 ### Development setup

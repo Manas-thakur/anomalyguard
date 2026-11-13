@@ -10,7 +10,7 @@ Quick use::
     result.data.to_csv("clean.csv", index=False)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from anomalyguard.api import Profile, detect, fix, profile, read
 

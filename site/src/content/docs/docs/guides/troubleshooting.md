@@ -46,7 +46,7 @@ No problems found.
 
 ## Common problems
 
-**`The web app needs the server extra`.** Install it: `pip install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"` (the error prints the command for your version; use `@main` for the latest code).
+**`The web app needs the server extra`.** Install it: `pip install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"` (the error prints the command for your version; use `@main` for the latest code).
 
 **`Parquet support needs pyarrow`.** Install the `parquet` extra. Databases other than SQLite need the `sql` extra.
 

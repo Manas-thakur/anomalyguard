@@ -458,6 +458,8 @@ def test_api_mute_hours_message(client, tmp_path, pipeline_dir):
 def test_install_hints_point_to_github():
     cmd = doctor.install_command("server")
     assert cmd.startswith('pip install "anomalyguard[server] @ git+https://github.com/')
-    assert cmd.endswith('@v0.3.0"')
+    from anomalyguard import __version__
+
+    assert cmd.endswith(f'@v{__version__}"')  # pinned to the installed release
     assert doctor.install_command(ref="main").endswith('anomalyguard@main"')
     assert all("git+https" in e["install"] for e in doctor.extras_status().values())

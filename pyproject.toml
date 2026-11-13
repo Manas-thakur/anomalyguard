@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anomalyguard"
-version = "0.3.0"
+version = "0.3.1"
 description = "Data anomaly detection and remediation: ingest, validate, detect, fix, alert and monitor - algorithms built from scratch."
 readme = "README.md"
 license = "MIT"

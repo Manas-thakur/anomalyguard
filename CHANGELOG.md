@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-13
+
 ### Added
 - Schema inference adds `max: now` to timestamp columns that are (almost) all in the past, so future timestamps are reported, and an email `pattern` to columns that hold email addresses, so malformed addresses are reported as "not a valid email address". `max: now` is evaluated at validation time.
 - `flatline` detector (aliases `stuck`, `stuck_at`): flags runs of identical consecutive values (a stuck sensor or frozen feed), with a run-length threshold learned from the data.

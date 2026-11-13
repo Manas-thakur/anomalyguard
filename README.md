@@ -30,7 +30,7 @@ AnomalyGuard reads data from files, databases or APIs, validates it against a sc
 ## Quickstart
 
 ```bash
-pip install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+pip install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 
 anomalyguard demo generate -d orders -o orders.csv        # 1,000 synthetic orders with known anomalies
 anomalyguard profile orders.csv                            # types, statistics, quality score
@@ -59,17 +59,17 @@ In the web app, **Analyze a file** walks through the same steps; the command pal
 
 Requires Python 3.10 or newer.
 
-AnomalyGuard is installed from GitHub (it is not on PyPI). These commands install the v0.3.0 release; replace `@v0.3.0` with `@main` for the latest code.
+AnomalyGuard is installed from GitHub (it is not on PyPI). These commands install the v0.3.0 release; replace `@v0.3.1` with `@main` for the latest code.
 
 ```bash
 # library + CLI
-pip install "anomalyguard @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+pip install "anomalyguard @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 
 # with the web app, Parquet and SQLAlchemy (PostgreSQL/MySQL/...) support
-pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+pip install "anomalyguard[all] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 
 # uv
-uv tool install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.0"
+uv tool install "anomalyguard[server] @ git+https://github.com/Manas-thakur/anomalyguard@v0.3.1"
 
 # container image (web app on http://localhost:8765); the volume keeps the database,
 # uploads and pipelines created in the web app
