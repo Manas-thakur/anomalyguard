@@ -8,6 +8,8 @@ const REPO = 'https://github.com/Manas-thakur/anomalyguard';
 export default defineConfig({
 	site: 'https://manas-thakur.github.io',
 	base: '/anomalyguard',
+	// /docs/ itself has no page; send it to the first docs page.
+	redirects: { '/docs': '/anomalyguard/docs/introduction/' },
 	trailingSlash: 'always',
 	integrations: [
 		starlight({
