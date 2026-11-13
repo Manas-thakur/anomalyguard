@@ -49,7 +49,7 @@ fields:
 anomalyguard profile orders.csv --schema-out orders.schema.yaml
 ```
 
-Inference picks a type for every column and adds conservative constraints: `nullable: false` for columns without nulls, `min: 0` for non-negative numeric columns, `allowed` values for small categoricals, and `unique` for id-like columns (which also become the primary key). In a pipeline, `schema.path` is loaded if the file exists; otherwise it is inferred on the first run and saved there, so you can edit it afterwards.
+Inference picks a type for every column and adds conservative constraints: `nullable: false` for columns without nulls, `min: 0` for non-negative numeric columns, `allowed` values for small categoricals, `unique` for id-like columns (which also become the primary key), `max: now` for timestamp columns whose values are at least 95% in the past, and an email `pattern` for text columns that hold email addresses. `max: now` is evaluated each time data is validated (with a day of slack for time zones), so a saved schema never goes stale; it reports values such as `2031-01-01 10:00:00 is in the future`. In a pipeline, `schema.path` is loaded if the file exists; otherwise it is inferred on the first run and saved there, so you can edit it afterwards.
 
 ## Validation
 

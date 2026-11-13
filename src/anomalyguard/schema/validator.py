@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from anomalyguard.ingest.inference import EMAIL_PATTERN
 from anomalyguard.schema.coercion import coerce_series
 from anomalyguard.schema.registry import DataType, Schema
 
@@ -29,6 +30,13 @@ class FieldError:
             "value": _jsonable(self.value),
             "message": self.message,
         }
+
+
+def _now_like(values: pd.Series) -> pd.Timestamp:
+    """The current time, tz-aware (UTC) if ``values`` are, naive otherwise."""
+    tz = getattr(values.dt, "tz", None) if hasattr(values, "dt") else None
+    now = pd.Timestamp.now(tz="UTC")
+    return now.tz_convert(tz) if tz is not None else now.tz_localize(None)
 
 
 def _jsonable(v: Any) -> Any:
@@ -185,15 +193,14 @@ class SchemaValidator:
                         lambda v, m=lo: f"{v} before {m}",
                     )
                 if fld.max is not None:
-                    hi = pd.Timestamp(fld.max)
-                    self._add(
-                        report,
-                        present & (values > hi),
-                        raw,
-                        name,
-                        "max",
-                        lambda v, m=hi: f"{v} after {m}",
-                    )
+                    if str(fld.max).strip().lower() == "now":
+                        # "not in the future", with a day of slack for time zones
+                        hi = _now_like(values) + pd.Timedelta(days=1)
+                        describe = lambda v, m=hi: f"{v} is in the future"  # noqa: E731
+                    else:
+                        hi = pd.Timestamp(fld.max)
+                        describe = lambda v, m=hi: f"{v} after {m}"  # noqa: E731
+                    self._add(report, present & (values > hi), raw, name, "max", describe)
 
             if fld.min_length is not None or fld.max_length is not None or fld.pattern:
                 as_str = raw.where(raw.isna(), raw.astype(str))
@@ -229,7 +236,11 @@ class SchemaValidator:
                         raw,
                         name,
                         "pattern",
-                        lambda v, p=fld.pattern: f"{v!r} does not match /{p}/",
+                        (
+                            (lambda v: f"{v!r} is not a valid email address")
+                            if fld.pattern == EMAIL_PATTERN
+                            else (lambda v, p=fld.pattern: f"{v!r} does not match /{p}/")
+                        ),
                     )
 
             if fld.allowed is not None:

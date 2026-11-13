@@ -17,6 +17,10 @@ CATEGORICAL_MAX_UNIQUE = 50
 CATEGORICAL_MAX_RATIO = 0.5
 
 
+# A deliberately simple address shape: something@domain.tld, no spaces.
+EMAIL_PATTERN = r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}"
+
+
 def infer_dtype(series: pd.Series) -> DataType:
     """Infer the logical type of a column, tolerating a few malformed values."""
     s = series.dropna()
@@ -84,6 +88,22 @@ def infer_schema(
                     fld.min = 0
             elif dtype == DataType.CATEGORICAL and present.nunique() <= 20:
                 fld.allowed = sorted(present.astype(str).unique().tolist())
+            elif dtype == DataType.DATETIME:
+                # Historical data (at least 95% of it in the past) should stay
+                # there: "now" is evaluated at validation time, so the saved
+                # schema does not go stale.
+                ts = pd.to_datetime(present, errors="coerce", utc=True).dropna()
+                if len(ts) >= 10:
+                    future = (ts > pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)).mean()
+                    if future <= 0.05:
+                        fld.max = "now"
+            elif dtype == DataType.STRING:
+                texts = present.astype(str).str.strip()
+                looks_email = texts.str.fullmatch(EMAIL_PATTERN).mean() if len(texts) else 0
+                # Mostly emails, or a column named like one that mostly holds them.
+                named_email = "email" in str(col).lower() and looks_email >= 0.6
+                if len(texts) >= 10 and (looks_email >= 0.9 or named_email):
+                    fld.pattern = EMAIL_PATTERN
             lname = str(col).lower()
             is_id_name = lname == "id" or lname.endswith("_id")
             mostly_unique = present.nunique() / len(present) >= 0.95
