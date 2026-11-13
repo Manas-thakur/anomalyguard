@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from anomalyguard.detect.base import _is_id_like
+from anomalyguard.detect.contextual import group_keys
 from anomalyguard.detect.report import AnomalyReport
 from anomalyguard.ingest.inference import infer_dtype
 from anomalyguard.remediate.strategies import (
@@ -261,7 +262,7 @@ class RemediationPipeline:
                 group_cols = report.group_columns(col)
                 groups = None
                 if group_cols and all(g in work.columns for g in group_cols):
-                    groups = work[group_cols].astype(str).agg("|".join, axis=1)
+                    groups = group_keys(work, group_cols)
                 changes.extend(
                     self._fix_outliers(
                         work,
@@ -399,6 +400,11 @@ class RemediationPipeline:
         """Copy changed cells from a numeric working copy into ``work``."""
         if target is work:
             return changes
+        if changes and pd.api.types.is_string_dtype(work[col].dtype):
+            # The column still holds unparseable text (the invalid policy kept
+            # it); pandas 3's strict string dtype refuses numbers, so hold
+            # mixed values like pandas 2 does.
+            work[col] = work[col].astype(object)
         pos = work.columns.get_loc(col)
         for c in changes:
             c.before = work.iat[c.row, pos]

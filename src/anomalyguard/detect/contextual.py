@@ -11,6 +11,21 @@ import pandas as pd
 from anomalyguard.detect.base import DetectionResult, Detector, Finding, numeric_columns
 
 
+def group_keys(df: pd.DataFrame, columns: list[str] | str) -> pd.Series:
+    """One string key per row for the given group column(s), e.g. ``"EU|Home"``.
+
+    Missing values become ``"nan"`` on every pandas version (pandas 3 keeps
+    them as NaN after ``astype(str)``, which would break the join and drop
+    those rows from their group).
+    """
+    cols = [columns] if isinstance(columns, str) else list(columns)
+    parts = [df[c].astype(object).where(df[c].notna(), "nan").astype(str) for c in cols]
+    keys = parts[0]
+    for part in parts[1:]:
+        keys = keys + "|" + part
+    return keys.astype(object)
+
+
 class GroupedDetector(Detector):
     """Fit a copy of ``base`` per value of ``group_by`` (e.g. per region or per
     customer). Groups smaller than ``min_group_size`` fall back to a detector
@@ -49,9 +64,7 @@ class GroupedDetector(Detector):
         return data
 
     def _keys(self, df: pd.DataFrame) -> pd.Series:
-        if len(self.group_by) == 1:
-            return df[self.group_by[0]].astype(str)
-        return df[self.group_by].astype(str).agg("|".join, axis=1)
+        return group_keys(df, self.group_by)
 
     def fit(self, data: Any) -> GroupedDetector:
         df = self._check(data)

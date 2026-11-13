@@ -598,3 +598,13 @@ def test_web_remediation_from_stored_findings_is_group_aware():
     assert rebuilt.groups == {"grouped(mad by region)": ["region"]}
     out = RemediationPipeline({"dedupe": False}).run(df, rebuilt).data
     assert 15000 < out.loc[205, "price"] < 23000
+
+
+def test_group_keys_handle_missing_values_on_every_pandas_version():
+    import pandas as pd
+
+    from anomalyguard.detect.contextual import group_keys
+
+    df = pd.DataFrame({"region": ["EU", None, "JP"], "cat": ["Home", "Toys", None]})
+    assert group_keys(df, ["region", "cat"]).tolist() == ["EU|Home", "nan|Toys", "JP|nan"]
+    assert group_keys(df, "region").tolist() == ["EU", "nan", "JP"]
