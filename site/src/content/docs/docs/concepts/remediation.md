@@ -49,7 +49,7 @@ A column policy inherits from `default` and overrides only the keys it sets.
 
 **Outlier strategies:**
 
-- `cap` clips to robust fences, median ± `cap_k` × MAD / 0.6745, computed from the values that were not flagged (the same fences as the `mad` detector).
+- `cap` clips to robust fences, median ± `cap_k` × MAD / 0.6745, computed from the values that were not flagged (the same fences as the `mad` detector). Capped values keep the column's decimal places. Only moderately out-of-range values are capped: a value more than three fence widths past the fences (for example a price typed ×100) or a negative value in a column that is never negative is left unchanged and flagged for review, because clipping it would write a plausible but wrong number.
 - `winsorize` clips to the 1st and 99th percentiles of the column.
 - `clip` clips to the explicit `min` / `max`.
 - `median` and `mean` replace the value; `null` blanks it.

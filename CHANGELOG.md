@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `cap` no longer overwrites values far outside the expected range (more than three fence widths past it, e.g. a value typed ×100) or negative values in never-negative columns with a plausible-looking number; they are left unchanged and flagged for review. Capped values keep the column's decimal places.
+- Results and run pages: the tab bar and analysis steps no longer show stray scrollbars.
+
 ## [0.3.0] - 2026-11-13
 
 ### Added

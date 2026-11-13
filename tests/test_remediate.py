@@ -53,8 +53,22 @@ def test_cap_winsorize_clip_setnull():
     vals = [10.0, 11, 9, 10, 12, 8, 10, 11, 9, 500]
     df = pd.DataFrame({"v": vals})
     mask = np.array([False] * 9 + [True])
-    ch = Cap(k=3.5).apply(df, "v", mask)
-    assert len(ch) == 1 and 10 < df["v"].iloc[-1] < 20
+    cap = Cap(k=3.5)
+    ch = cap.apply(df, "v", mask)
+    # 500 is ~50x the typical value: a typo, not a value to clip. It is left as
+    # is and reported as skipped so the pipeline sends it to review.
+    assert ch == [] and df["v"].iloc[-1] == 500 and "too far" in cap.skipped[9]
+    df = pd.DataFrame({"v": [10.0, 11, 9, 10, 12, 8, 10, 11, 9, 16.25]})
+    ch = Cap(k=3.5).apply(df, "v", mask)  # moderately out of range: capped
+    assert len(ch) == 1 and 10 < df["v"].iloc[-1] < 16.25
+    assert df["v"].iloc[-1] == round(df["v"].iloc[-1])  # whole-number column stays whole
+    df = pd.DataFrame({"v": [10.0, 11, 9, 10, 12, 8, 10, 11, 9, -12.0]})
+    cap = Cap(k=3.5)
+    assert cap.apply(df, "v", mask) == [] and "never negative" in cap.skipped[9]
+    prices = pd.DataFrame({"p": [10.25, 11.5, 9.75, 10.0, 12.1, 8.4, 10.3, 11.2, 9.9, 15.0]})
+    Cap(k=3.5).apply(prices, "p", mask)
+    capped = prices["p"].iloc[-1]
+    assert capped < 15.0 and capped == round(capped, 2)  # keeps the column's 2 decimals
     df = pd.DataFrame({"v": vals})
     Winsorize(0.0, 0.8).apply(df, "v", mask)
     assert df["v"].iloc[-1] <= 12
@@ -101,8 +115,11 @@ def test_pipeline_end_to_end_on_orders(orders):
     assert pd.api.types.is_numeric_dtype(out["unit_price"])
     for col in ("quantity", "unit_price", "delivery_days", "region"):
         assert out[col].isna().sum() == 0, col
-    # point outliers in quantity are capped
-    assert out["quantity"].max() < 50
+    # quantities far outside the range (x100 typos) are not replaced by an
+    # invented value: they stay and are flagged for review
+    huge = set(np.flatnonzero(out["quantity"].to_numpy() >= 50).tolist())
+    flagged_quantity = {f.row for f in result.flagged if f.column == "quantity"}
+    assert huge and len(huge) <= len(flagged_quantity)
     strategies = {c.strategy for c in result.changes}
     assert {"type_fix", "cap", "impute_median", "impute_mode"} <= strategies
     # the original frame is untouched
@@ -251,4 +268,5 @@ def test_pipeline_uses_llm_for_flagged_items():
 def test_fix_api(orders):
     df, _ = orders
     res = ag.fix(df, columns=["quantity", "unit_price", "delivery_days"])
-    assert res.data["quantity"].max() < 50
+    big = int((res.data["quantity"] >= 50).sum())
+    assert big and big <= len({f.row for f in res.flagged if f.column == "quantity"})

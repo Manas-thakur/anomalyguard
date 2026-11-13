@@ -203,7 +203,7 @@ export default function RunDetailPage() {
         />
       )}
       <Tabs value={tab} onValueChange={setTab} className="gap-4">
-        <TabsList className="w-full justify-start overflow-x-auto sm:w-fit">
+        <TabsList className="w-full justify-start overflow-x-auto overflow-y-hidden [scrollbar-width:none] sm:w-fit">
           <TabsTrigger value="incidents" className="gap-1.5">
             Incidents
             {incidents.data?.open ? (

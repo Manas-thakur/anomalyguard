@@ -75,7 +75,8 @@ def test_end_to_end_run(tmp_path, orders):
 
     clean = pd.read_csv(tmp_path / "out" / "clean.csv")
     assert len(clean) == len(df) - m["rows_dropped"]
-    assert clean["quantity"].max() < 50
+    # far-out quantities are left for review rather than overwritten
+    assert m["flagged_for_review"] >= int((clean["quantity"] >= 50).sum()) > 0
     report = json.loads((tmp_path / "out" / "anomalies.json").read_text())
     assert report["summary"]["n_anomalies"] == m["n_anomalies"]
     assert "# Remediation report" in (tmp_path / "out" / "report.md").read_text()

@@ -156,15 +156,41 @@ class Impute(Strategy):
         return self._changes(before, df, column, rows, reason or "missing value")
 
 
+def _decimals(s: pd.Series, limit: int = 6) -> int:
+    """Decimal places used by the column's values (e.g. 2 for prices)."""
+    nums = _numeric(s).dropna()
+    if nums.empty:
+        return limit
+    sample = nums.iloc[: min(len(nums), 2000)]
+    places = 0
+    for v in sample:
+        text = f"{v:.{limit}f}".rstrip("0")
+        places = max(places, len(text.split(".")[1]) if "." in text else 0)
+        if places >= limit:
+            break
+    return places
+
+
 class Cap(Strategy):
     """Clip flagged values to robust fences ``median +- k * MAD / 0.6745``
-    computed from the unflagged values (the same fences as the MAD detector)."""
+    computed from the unflagged values (the same fences as the MAD detector).
+
+    Capping is only safe for values that are moderately out of range. A value
+    far beyond the fences (by default more than ``max_stretch`` fence widths
+    past them, e.g. a price typed x100) or with the wrong sign for a column
+    that is never negative is a different kind of error: clipping it would
+    write a plausible-looking but wrong number. Such values are left as they
+    are (the remediation pipeline sends them to review) and listed in
+    :attr:`skipped` with the reason.
+    """
 
     name = "cap"
     confidence = 0.8
 
-    def __init__(self, k: float = 3.5):
+    def __init__(self, k: float = 3.5, max_stretch: float = 3.0):
         self.k = k
+        self.max_stretch = max_stretch
+        self.skipped: dict[int, str] = {}
 
     def bounds(self, s: pd.Series, mask: np.ndarray) -> tuple[float, float] | None:
         clean = _numeric(s[~mask]).dropna()
@@ -178,16 +204,42 @@ class Cap(Strategy):
         return med - width, med + width
 
     def apply(self, df, column, mask, reason=""):
+        self.skipped = {}
         rows = np.flatnonzero(mask)
         b = self.bounds(df[column], mask)
         if not len(rows) or b is None:
             return []
+        lo, hi = b
+        nums = _numeric(df[column])
+        clean = nums[~mask].dropna()
+        non_negative = bool(len(clean)) and float(clean.min()) >= 0
+        reach = self.max_stretch * max(hi - lo, 1e-12) / 2
+        keep = []
+        for r in rows.tolist():
+            v = nums.iloc[r]
+            if pd.isna(v):
+                continue
+            if non_negative and v < 0:
+                self.skipped[r] = (
+                    f"negative value in a column that is never negative; not capped "
+                    f"(expected {fmt(lo)} to {fmt(hi)})"
+                )
+            elif v > hi + reach or v < lo - reach:
+                self.skipped[r] = (
+                    f"too far outside the expected range {fmt(lo)} to {fmt(hi)} to cap "
+                    f"safely (possible unit or typing error)"
+                )
+            else:
+                keep.append(r)
+        rows = np.asarray(keep, dtype=int)
+        if not len(rows):
+            return []
         before = df[column].copy()
-        vals = _numeric(df[column]).iloc[rows].clip(b[0], b[1])
-        if pd.api.types.is_integer_dtype(df[column].dtype) or np.all(
-            np.mod(_numeric(df[column]).dropna(), 1) == 0
-        ):
+        vals = nums.iloc[rows].clip(lo, hi)
+        if pd.api.types.is_integer_dtype(df[column].dtype) or np.all(np.mod(clean, 1) == 0):
             vals = vals.round()
+        else:
+            vals = vals.round(_decimals(clean))
         _set(df, rows, column, vals.to_numpy())
         return self._changes(
             before, df, column, rows, reason or f"capped to [{fmt(b[0])}, {fmt(b[1])}]"

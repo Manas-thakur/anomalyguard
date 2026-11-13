@@ -15,7 +15,7 @@ export const STEP_NAMES = ["Upload", "Profile", "Detect", "Results", "Fix & expo
 
 export function Stepper({ current, links = {} }: { current: number; links?: Record<number, string> }) {
   return (
-    <nav aria-label="Analysis steps" className="overflow-x-auto">
+    <nav aria-label="Analysis steps" className="overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
       <ol className="flex min-w-max items-center gap-1 text-sm">
         {STEP_NAMES.map((name, i) => {
           const n = i + 1;

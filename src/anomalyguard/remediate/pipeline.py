@@ -325,10 +325,13 @@ class RemediationPipeline:
         changed = {c.row for c in changes}
         for c in changes:
             c.reason = f"{c.reason}; detected: {why[c.row]}"
-        # values a robust cap cannot move (e.g. contextual anomalies) go to review
+        # values a robust cap cannot move (e.g. contextual anomalies) or should not
+        # move (far out of range, wrong sign) go to review
+        skipped = getattr(strategy, "skipped", {})
         for r in rows.tolist():
             if r not in changed:
-                flag(r, col, f"{why[r]} (not auto-fixable by {strategy.name})", src[r])
+                note = skipped.get(r) or f"not auto-fixable by {strategy.name}"
+                flag(r, col, f"{why[r]} ({note})", src[r])
         return changes
 
     def _fix_constraints(self, work, flag) -> list[Change]:

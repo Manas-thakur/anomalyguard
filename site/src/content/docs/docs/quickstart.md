@@ -75,12 +75,12 @@ anomalyguard fix orders.csv -o orders_clean.csv --group-by region --report fix.m
 
 ```
 Wrote 990 rows to orders_clean.csv
-  45 cells fixed, 10 rows dropped, 16 rows flagged for review
-  by strategy: cap=25, impute_median=12, impute_mode=3, type_fix=5
+  26 cells fixed, 10 rows dropped, 35 rows flagged for review
+  by strategy: cap=6, impute_median=12, impute_mode=3, type_fix=5
   report: fix.md
 ```
 
-Duplicates were dropped, unparseable values coerced to missing and imputed, and outliers capped to robust fences. Values that a cap could not move were flagged. `fix.md` lists every changed cell with its before and after values and the reason. Add `--review-db review.db` to put the flagged values in a review queue. See [Remediation](/anomalyguard/docs/concepts/remediation/).
+Duplicates were dropped, unparseable values coerced to missing and imputed, and moderate outliers capped to robust fences. Values far outside the range (such as a quantity typed as 429) or with the wrong sign are not overwritten with an invented number: they are flagged for review, together with values a cap could not move. `fix.md` lists every changed cell with its before and after values and the reason. Add `--review-db review.db` to put the flagged values in a review queue. See [Remediation](/anomalyguard/docs/concepts/remediation/).
 
 ## 5. Run a pipeline
 
@@ -93,7 +93,7 @@ anomalyguard run pipeline.yaml
 
 ```
 Wrote pipeline.yaml (template: csv_quality). Next: anomalyguard run pipeline.yaml
-[orders] run #1: 1000 rows, 33 anomalies (3.3%), quality 98.6%, 47 cells fixed, 10 dropped, 6 flagged, 0 alerts, 212 ms
+[orders] run #1: 1000 rows, 33 anomalies (3.3%), quality 98.6%, 28 cells fixed, 10 dropped, 25 flagged, 0 alerts, 275 ms
     data: .../out/orders_clean.csv
     anomalies: .../out/orders_anomalies.json
     report: .../out/orders_remediation.md
