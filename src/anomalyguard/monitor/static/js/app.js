@@ -1,8 +1,10 @@
-// App shell: hash router, theme switch, API-key prompt, sidebar badge.
+// App shell: hash router, theme, command palette, keyboard shortcuts, API-key
+// prompt and the sidebar badge.
 
 import { api, onKeyRequired, setKey } from "./api.js";
 import { clear, closeDrawer, closePopover, errorState, h, setTitle } from "./ui.js";
-import * as overview from "./pages/overview.js";
+import { initPalette, open as openPalette, close as closePalette } from "./palette.js";
+import * as health from "./pages/health.js";
 import * as analyze from "./pages/analyze.js";
 import * as runs from "./pages/runs.js";
 import * as review from "./pages/review.js";
@@ -10,7 +12,7 @@ import * as pipelines from "./pages/pipelines.js";
 import * as settings from "./pages/settings.js";
 
 const ROUTES = [
-  { re: /^overview$/, page: overview, nav: "overview" },
+  { re: /^(?:health|overview)$/, page: health, nav: "health" },
   { re: /^analyze(?:\/(d|a)\/([a-f0-9]+))?$/, page: analyze, nav: "analyze", params: (m) => ({ kind: m[1], id: m[2] }) },
   { re: /^runs$/, page: runs, nav: "runs" },
   { re: /^runs\/(\d+)$/, page: runs, nav: "runs", params: (m) => ({ id: Number(m[1]) }) },
@@ -26,7 +28,7 @@ let cleanup = null;
 
 /** Parse "#/runs?status=failed" into { path, query }. */
 export function currentRoute() {
-  const raw = location.hash.replace(/^#\/?/, "") || "overview";
+  const raw = location.hash.replace(/^#\/?/, "") || "health";
   const [path, q = ""] = raw.split("?");
   return { path, query: Object.fromEntries(new URLSearchParams(q)) };
 }
@@ -43,8 +45,8 @@ function render() {
   if (cleanup) { try { cleanup(); } catch { /* page already gone */ } cleanup = null; }
   closeDrawer();
   closePopover();
-  appEl.classList.remove("nav-open");
-  document.getElementById("nav-toggle").setAttribute("aria-expanded", "false");
+  closePalette();
+  setNav(false);
   const route = ROUTES.find((r) => r.re.test(path));
   for (const a of document.querySelectorAll("#nav a")) {
     if (route && a.dataset.route === route.nav) a.setAttribute("aria-current", "page");
@@ -52,6 +54,7 @@ function render() {
   }
   const page = h("div", { class: "page view-enter" });
   clear(main).append(page);
+  document.body.dataset.route = route ? route.nav : "";
   if (!route) {
     setTitle("Not found");
     page.append(errorState(new Error(`No page at #/${path}`)));
@@ -71,7 +74,9 @@ function render() {
 
 // ---------------------------------------------------------------- theme
 const THEME_KEY = "ag.theme";
+let themeChoice = "system";
 function applyTheme(choice) {
+  themeChoice = choice;
   if (choice === "light" || choice === "dark") document.documentElement.dataset.theme = choice;
   else delete document.documentElement.dataset.theme;
   for (const b of document.querySelectorAll("[data-theme-choice]")) {
@@ -79,31 +84,109 @@ function applyTheme(choice) {
   }
   window.dispatchEvent(new CustomEvent("themechange"));
 }
-let savedTheme = "system";
-try { savedTheme = localStorage.getItem(THEME_KEY) || "system"; } catch { /* storage blocked */ }
-applyTheme(savedTheme);
+/** The theme in effect: "light" or "dark" (resolving "system"). */
+export function effectiveTheme() {
+  if (themeChoice === "light" || themeChoice === "dark") return themeChoice;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+export function setTheme(choice) {
+  try { if (choice === "system") localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, choice); } catch { /* ignore */ }
+  applyTheme(choice);
+}
+try { themeChoice = localStorage.getItem(THEME_KEY) || "system"; } catch { /* storage blocked */ }
+applyTheme(themeChoice);
 for (const b of document.querySelectorAll("[data-theme-choice]")) {
-  b.addEventListener("click", () => {
-    const choice = b.dataset.themeChoice;
-    try { if (choice === "system") localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, choice); } catch { /* ignore */ }
-    applyTheme(choice);
-  });
+  b.addEventListener("click", () => setTheme(b.dataset.themeChoice));
 }
 
 // ---------------------------------------------------------------- mobile nav
 const toggle = document.getElementById("nav-toggle");
-toggle.addEventListener("click", () => {
-  const open = !appEl.classList.contains("nav-open");
+function setNav(open) {
   appEl.classList.toggle("nav-open", open);
   toggle.setAttribute("aria-expanded", String(open));
+}
+toggle.addEventListener("click", () => {
+  const open = !appEl.classList.contains("nav-open");
+  setNav(open);
   if (open) document.querySelector("#nav a")?.focus();
 });
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && appEl.classList.contains("nav-open")) { appEl.classList.remove("nav-open"); toggle.focus(); }
-});
 appEl.addEventListener("click", (e) => {
-  if (e.target === appEl || e.target === main) appEl.classList.remove("nav-open");
+  if (e.target === appEl || e.target === main) setNav(false);
 });
+
+// ---------------------------------------------------------------- shortcuts
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+for (const k of document.querySelectorAll("[data-mod-key]")) k.textContent = isMac ? "⌘K" : "Ctrl K";
+
+export const SHORTCUTS = [
+  ["Anywhere", [
+    [isMac ? "⌘ K" : "Ctrl K", "Open the command palette"],
+    ["?", "Show keyboard shortcuts"],
+    ["g h", "Go to Health"],
+    ["g r", "Go to Runs"],
+    ["g i", "Go to the review inbox"],
+    ["g a", "Go to Analyze"],
+    ["g p", "Go to Pipelines"],
+    ["g s", "Go to Settings"],
+    ["/", "Focus search on the page"],
+  ]],
+  ["Review inbox", [
+    ["j  k", "Next / previous item"],
+    ["a", "Approve (selection, or the open item)"],
+    ["r", "Reject: keep the original value"],
+    ["m", "Mark as normal (false positive)"],
+    ["e", "Edit the final value"],
+    ["x", "Select or deselect the open item"],
+    ["Shift click", "Select a range"],
+    ["Esc", "Clear the selection or close the item"],
+  ]],
+];
+
+const shortcutsDialog = document.getElementById("shortcuts");
+function showShortcuts() {
+  const grid = clear(document.getElementById("shortcut-grid"));
+  for (const [title, rows] of SHORTCUTS) {
+    grid.append(h("section", null, h("h3", { class: "label" }, title), h("dl", null, rows.flatMap(([keys, what]) => [
+      h("dt", null, keys.split(/\s+/).map((k) => h("kbd", null, k))), h("dd", null, what)]))));
+  }
+  if (!shortcutsDialog.open) shortcutsDialog.showModal();
+}
+for (const b of document.querySelectorAll("[data-open-shortcuts]")) b.addEventListener("click", showShortcuts);
+shortcutsDialog.addEventListener("click", (e) => { if (e.target === shortcutsDialog) shortcutsDialog.close(); });
+
+/** True when a key press is meant for a text field or an open dialog. */
+export function typingTarget(e) {
+  const t = e.target;
+  if (!(t instanceof Element)) return false;
+  return Boolean(t.closest("input, textarea, select, [contenteditable=''], [contenteditable=true]")) || Boolean(document.querySelector("dialog[open]"));
+}
+
+const GO = { h: "#/health", r: "#/runs", i: "#/review", a: "#/analyze", p: "#/pipelines", s: "#/settings", q: "#/review" };
+let pendingG = 0;
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    if (document.getElementById("palette").open) closePalette(); else openPalette();
+    return;
+  }
+  if (e.key === "Escape" && appEl.classList.contains("nav-open")) { setNav(false); toggle.focus(); return; }
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || typingTarget(e)) return;
+  if (e.key === "?") { e.preventDefault(); showShortcuts(); return; }
+  if (e.key === "/") {
+    const search = main.querySelector("input[type=search]");
+    if (search) { e.preventDefault(); search.focus(); search.select(); }
+    return;
+  }
+  if (pendingG && Date.now() - pendingG < 1200 && GO[e.key]) {
+    e.preventDefault();
+    pendingG = 0;
+    location.hash = GO[e.key];
+    return;
+  }
+  pendingG = e.key === "g" ? Date.now() : 0;
+});
+
+initPalette({ setTheme, theme: () => effectiveTheme(), showShortcuts });
 
 // ---------------------------------------------------------------- API key prompt
 const dialog = document.getElementById("key-dialog");
@@ -152,7 +235,7 @@ async function boot() {
     if (auth.auth_enabled && !auth.authenticated) setKey("");
   } catch { /* the page will show its own error */ }
   fetch("/health").then((r) => r.json()).then((hl) => {
-    document.getElementById("app-version").textContent = `AnomalyGuard ${hl.version}`;
+    document.getElementById("app-version").textContent = `v${hl.version}`;
   }).catch(() => {});
   window.addEventListener("hashchange", render);
   render();

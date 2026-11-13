@@ -2,8 +2,9 @@
 
 import { api } from "../api.js";
 import { barList } from "../charts.js";
+import { incidentList } from "../incidents.js";
 import {
-  busy, button, chip, clear, debounce, emptyState, errorState, fmtInt, fmtMs, fmtNum, fmtPct,
+  busy, button, chip, clear, tabBar, debounce, emptyState, errorState, fmtInt, fmtMs, fmtNum, fmtPct,
   fmtTime, fmtValue, h, isAnalysis, kpis, loading, pageHead, pager, panel, runLabel, select,
   segmented, setTitle, timeEl, toast,
 } from "../ui.js";
@@ -98,36 +99,69 @@ function renderRun(root, runId) {
     const bd = run.breakdown;
     const analysisId = m.analysis_id;
     const rem = m.remediation;
+    const q = currentRoute().query;
     const actions = [];
-    if (analysisId) actions.push(h("a", { class: "btn primary", href: `#/analyze/a/${analysisId}` }, "Open in Analyze"));
+    if (analysisId) actions.push(h("a", { class: "btn", href: `#/analyze/a/${analysisId}` }, "Open in Analyze"));
     if (run.review) actions.push(h("a", { class: "btn", href: `#/review?run=${run.id}&status=all` }, `Review items (${fmtInt(run.review)})`));
-    add(clear(body), 
+    setTitle(`${runLabel(run.pipeline)} · run #${run.id}`);
+
+    const tabDefs = [
+      { id: "incidents", label: "Incidents" },
+      { id: "findings", label: `Findings (${fmtInt(bd.findings)})` },
+      { id: "details", label: "Remediation & outputs" },
+    ];
+    const state = { tab: tabDefs.some((t) => t.id === q.tab) ? q.tab : "incidents" };
+    const panels = {};
+    let table = null;
+    const tabs = tabBar(tabDefs, state.tab, (id) => { state.tab = id; show(); });
+    const countBadge = h("span", { class: "tab-count" });
+    tabs.buttons.incidents.append(countBadge);
+
+    const incidents = incidentList(run.id, {
+      focus: q.incident || null,
+      onCount: (n) => { countBadge.textContent = n ? String(n) : ""; countBadge.hidden = !n; },
+      onFilter: (column) => { state.tab = "findings"; tabs.select("findings"); show(); table.filter("column", column, true); },
+    });
+    panels.incidents = h("div", { class: "stack" }, incidents.el);
+    table = anomalyTable(run);
+    panels.findings = h("div", { class: "stack" },
+      h("div", { class: "grid grid-2" },
+        panel({ title: "Findings by column", sub: `${fmtInt(bd.findings)} stored findings on ${fmtInt(bd.rows)} rows`, body: barList(Object.entries(bd.by_column).map(([k, v]) => ({ label: k, value: v, onClick: () => table.filter("column", k) })), { format: fmtInt, empty: "No findings stored for this run." }) }),
+        panel({ title: "Findings by detector", sub: severityLine(bd.by_severity), body: barList(Object.entries(bd.by_detector).map(([k, v]) => ({ label: k, value: v, onClick: () => table.filter("detector", k) })), { format: fmtInt, empty: "No findings stored for this run." }) })),
+      table.el);
+    panels.details = h("div", { class: "stack" },
+      h("div", { class: "grid grid-2" },
+        panel({ title: "Remediation", body: remediationSummary(run, rem) }),
+        panel({ title: "Alerts sent", body: alertsList(run.alerts), flush: true })),
+      panel({ title: "Artifacts", sub: "Outputs written by this run", body: artifactList(run) }));
+    const content = h("div", { role: "tabpanel", "aria-labelledby": "" });
+
+    function show() {
+      setQuery({ tab: state.tab === "incidents" ? "" : state.tab });
+      content.setAttribute("aria-labelledby", `tab-${state.tab}`);
+      content.replaceChildren(panels[state.tab]);
+    }
+
+    add(clear(body),
       pageHead({
         title: `${runLabel(run.pipeline)} · run #${run.id}`,
         crumbs: [{ label: "Runs", href: "#/runs" }, { label: `#${run.id}` }],
-        lede: `${run.kind === "analysis" ? "Analysis" : "Pipeline run"} started ${fmtTime(run.started_at)}, took ${fmtMs(run.duration_ms)}.`,
+        lede: `${run.kind === "analysis" ? "Analysis" : "Pipeline run"} started ${fmtTime(run.started_at)}, took ${fmtMs(run.duration_ms)}.${m.source ? ` Source: ${m.source.split(/[\\/]/).pop()}` : ""}`,
         actions,
       }),
-      h("div", { class: "row" }, chip(run.status), m.source ? h("span", { class: "muted small mono truncate", style: { maxWidth: "100%" }, title: m.source }, m.source) : null),
       run.error ? h("div", { class: "notice error", role: "alert" }, h("div", null, h("strong", null, "Run failed. "), run.error)) : null,
       kpis([
+        { label: "Status", value: chip(run.status) },
         { label: "Rows", value: fmtInt(run.rows) },
         { label: "Anomalous rows", value: fmtInt(run.n_anomalies), sub: fmtPct(run.anomaly_rate) },
         { label: "Quality", value: run.quality_score === null ? "-" : fmtPct(run.quality_score), sub: run.validity !== null && run.validity !== undefined ? `validity ${fmtPct(run.validity)}` : null },
-        { label: "Cells fixed", value: fmtInt(run.cells_changed), sub: `${fmtInt(run.rows_dropped)} rows dropped` },
-        { label: "Flagged", value: fmtInt(run.flagged_for_review), sub: "rows sent to review" },
+        { label: "Fixed / flagged", value: `${fmtInt(run.cells_changed)} / ${fmtInt(run.flagged_for_review)}`, sub: `${fmtInt(run.rows_dropped)} rows dropped` },
         { label: "Alerts", value: fmtInt(run.alerts_sent), alert: run.alerts_sent > 0 },
-      ]),
-      h("div", { class: "grid grid-2" },
-        panel({ title: "Findings by column", sub: `${fmtInt(bd.findings)} stored findings on ${fmtInt(bd.rows)} rows`, body: barList(Object.entries(bd.by_column).map(([k, v]) => ({ label: k, value: v, onClick: () => table.filter("column", k) })), { format: fmtInt, empty: "No findings stored for this run." }) }),
-        panel({ title: "Findings by detector", sub: severityLine(bd.by_severity), body: barList(Object.entries(bd.by_detector).map(([k, v]) => ({ label: k, value: v, onClick: () => table.filter("detector", k) })), { format: fmtInt, color: "var(--series-2)", empty: "No findings stored for this run." }) })),
+      ], { compact: true }),
+      tabs.el,
+      content,
     );
-    const table = anomalyTable(run);
-    body.append(table.el);
-    body.append(h("div", { class: "grid grid-2" },
-      panel({ title: "Remediation", body: remediationSummary(run, rem) }),
-      panel({ title: "Alerts sent", body: alertsList(run.alerts), flush: true })));
-    body.append(panel({ title: "Artifacts", sub: "Outputs written by this run", body: artifactList(run) }));
+    show();
   }
 
   load();
@@ -236,8 +270,8 @@ function anomalyTable(run) {
     slot);
   return {
     el,
-    filter(key, value) {
-      state[key] = state[key] === value ? "" : value;
+    filter(key, value, force = false) {
+      state[key] = state[key] === value && !force ? "" : value;
       state.offset = 0;
       if (key === "column") colSel.value = state.column;
       if (key === "detector") detSel.value = state.detector;

@@ -386,3 +386,126 @@ def test_sample_datasets(client):
 
     bad = client.post("/api/datasets/sample", json={"kind": "nope"})
     assert bad.status_code == 422
+
+
+def test_incidents_for_an_analysis(client):
+    meta = client.post("/api/datasets/sample", json={"kind": "orders"}).json()
+    analysis = analyze(client, meta["id"], group_by="region")
+    run_id = analysis["run_id"]
+
+    out = client.get(f"/api/runs/{run_id}/incidents").json()
+    assert out["run_id"] == run_id and out["muted"] == 0
+    items = out["incidents"]
+    assert items and out["open"] == len(items)
+    ranks = [{"high": 0, "medium": 1, "low": 2}[i["severity"]] for i in items]
+    assert ranks == sorted(ranks)
+    price = next(i for i in items if i["column"] == "unit_price" and i["kind"] == "outlier")
+    assert price["entity"] == "sample_orders.unit_price"
+    assert price["title"].startswith("Values") and price["explanation"]
+    assert {"grouped(mad by region)", "grouped(iforest by region)"} <= set(price["detectors"])
+    exp = price["expected"]
+    assert exp["low"] <= exp["center"] <= exp["high"]
+    assert price["actual"]["value"] > exp["high"] and price["delta_pct"] > 0
+    assert price["status"] == "open" and price["chart"] == "distribution"
+    kinds = {i["kind"] for i in items}
+    assert {"missing", "duplicates"} <= kinds  # from the profile's quality metrics
+    # First run of this source: no baseline, so missing values are not called a spike.
+    missing = [i for i in items if i["kind"] == "missing"]
+    assert all(i["title"] == "Missing values" and i["direction"] is None for i in missing)
+    assert all("no baseline" in i["explanation"] for i in missing)
+
+    chart = client.get(f"/api/runs/{run_id}/incidents/{price['id']}/chart").json()
+    assert chart["type"] == "distribution" and len(chart["counts"]) == len(chart["edges"]) - 1
+    assert chart["band"]["low"] == exp["low"] and chart["marks"]
+    assert any(m["v"] > chart["band"]["high"] for m in chart["marks"])
+    dup = next(i for i in items if i["kind"] == "duplicates")
+    hist = client.get(f"/api/runs/{run_id}/incidents/{dup['id']}/chart").json()
+    assert hist["type"] == "history" and hist["points"][-1]["v"] == dup["actual"]["value"]
+    assert client.get(f"/api/runs/{run_id}/incidents/nope/chart").status_code == 404
+    assert client.get("/api/runs/99999/incidents").status_code == 404
+
+    # mark as normal: every finding becomes false-positive feedback
+    qty = next(i for i in items if i["column"] == "quantity" and i["kind"] == "outlier")
+    r = client.post(f"/api/runs/{run_id}/incidents/{qty['id']}/triage", json={"action": "normal"})
+    assert r.status_code == 200, r.text
+    assert r.json()["incident"]["status"] == "normal" and r.json()["feedback"] == qty["n_findings"]
+    precision = client.get("/api/feedback").json()["precision"]
+    assert sum(v["false_positive"] for v in precision.values()) == qty["n_findings"]
+
+    # confirm: true positives, and the flagged cells go to the review queue
+    r = client.post(
+        f"/api/runs/{run_id}/incidents/{price['id']}/triage", json={"action": "confirm"}
+    )
+    body = r.json()
+    assert body["incident"]["status"] == "confirmed" and body["queued"] == price["n_rows"]
+    queued = client.get(f"/api/review?run_id={run_id}&column=unit_price&limit=1000").json()
+    assert len(queued) == price["n_rows"]
+    assert any(q["suggestion"] == round(exp["high"], 4) for q in queued)  # capped to the band
+    again = client.post(
+        f"/api/runs/{run_id}/incidents/{price['id']}/triage", json={"action": "confirm"}
+    ).json()
+    assert again["queued"] == price["n_rows"]  # no duplicates in the queue
+    assert int(client.get("/api/review?status=all").headers["x-total-count"]) == price["n_rows"]
+    reopened = client.post(
+        f"/api/runs/{run_id}/incidents/{price['id']}/triage", json={"action": "reopen"}
+    ).json()
+    assert reopened["incident"]["status"] == "open"
+    bad = client.post(f"/api/runs/{run_id}/incidents/{price['id']}/triage", json={"action": "x"})
+    assert bad.status_code == 422
+
+    # mute for 24 h: hidden by default, listed with include_muted, and unmutable
+    m = client.post(f"/api/runs/{run_id}/incidents/{dup['id']}/mute", json={"hours": 24}).json()
+    assert m["kind"] == "duplicates" and m["until"] > m["created_at"]
+    out = client.get(f"/api/runs/{run_id}/incidents").json()
+    assert out["muted"] == 1 and all(i["id"] != dup["id"] for i in out["incidents"])
+    every = client.get(f"/api/runs/{run_id}/incidents?include_muted=true").json()["incidents"]
+    assert next(i for i in every if i["id"] == dup["id"])["muted_until"] == m["until"]
+    assert [x["id"] for x in client.get("/api/incidents/mutes").json()] == [m["id"]]
+    bad_mute = client.post(f"/api/runs/{run_id}/incidents/{dup['id']}/mute", json={"hours": 0})
+    assert bad_mute.status_code == 422
+    # mutes follow the source, so the next analysis of the same file is muted too
+    second = analyze(client, meta["id"], group_by="region")
+    nxt = client.get(f"/api/runs/{second['run_id']}/incidents").json()
+    assert nxt["muted"] == 1
+    assert client.delete(f"/api/incidents/mutes/{m['id']}").json()["deleted"] == m["id"]
+    assert client.delete(f"/api/incidents/mutes/{m['id']}").status_code == 404
+    assert client.get(f"/api/runs/{run_id}/incidents").json()["muted"] == 0
+
+    feed = client.get("/api/incidents?limit=5").json()
+    assert len(feed) == 5 and feed[0]["run_id"] == second["run_id"]
+
+
+def test_incidents_time_series_band(client):
+    meta = client.post("/api/datasets/sample", json={"kind": "sensor"}).json()
+    analysis = analyze(client, meta["id"], detectors=["seasonal", "cusum"], time_column="timestamp")
+    items = client.get(f"/api/runs/{analysis['run_id']}/incidents").json()["incidents"]
+    kinds = {i["kind"] for i in items if i["column"] == "temperature"}
+    assert {"pattern", "level_shift"} <= kinds
+    shift = next(i for i in items if i["kind"] == "level_shift")
+    assert shift["title"] == "Level shift detected" and shift["chart"] == "series"
+    chart = client.get(f"/api/runs/{analysis['run_id']}/incidents/{shift['id']}/chart").json()
+    n = len(chart["x"])
+    assert chart["type"] == "series" and chart["time"] == "timestamp" and chart["period"] == 24
+    assert n == len(chart["y"]) == len(chart["low"]) == len(chart["high"]) and n <= 1500
+    assert all(
+        lo <= hi for lo, hi in zip(chart["low"], chart["high"], strict=True) if lo is not None
+    )
+    outside = [
+        i for i in chart["flagged"] if not chart["low"][i] <= chart["y"][i] <= chart["high"][i]
+    ]
+    assert outside  # the flagged readings break out of the expected band
+
+
+def test_health_overview(client):
+    empty = client.get("/api/health/overview").json()
+    assert empty["sources"] == [] and empty["kpis"]["monitored"] == 0
+    meta = client.post("/api/datasets/sample", json={"kind": "orders"}).json()
+    analyze(client, meta["id"])
+    analyze(client, meta["id"])
+    h = client.get("/api/health/overview").json()
+    assert h["kpis"]["monitored"] == 1 and h["kpis"]["rows_scanned"] == 2000
+    src = h["sources"][0]
+    assert src["name"] == "sample_orders" and src["kind"] == "analysis"
+    assert src["status"] in ("degraded", "warning") and src["open_incidents"] > 0
+    assert len(src["quality_series"]) == 2 and src["trend"] == 0
+    assert h["kpis"]["open_incidents"] == src["open_incidents"]

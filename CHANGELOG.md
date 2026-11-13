@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Incidents**: findings of a run are grouped by source, column and kind. Each incident has a
+  plain-language status tag, a one-sentence explanation, the expected range (robust MAD band, or
+  trend + seasonality for time series) against the actual value, and a chart with the band shaded.
+  Inline triage: *Mark as normal* (false-positive feedback), *Confirm* (true positives, flagged cells
+  sent to review) and *Mute 24h* (per source, column and kind). New endpoints under
+  `/api/runs/{id}/incidents`, `/api/incidents` and `/api/health/overview`.
+- **Health** page (replaces Overview): KPI strip, one row per source with status, quality
+  sparkline, trend arrow, open incidents and last run, and a recent-incidents feed.
+- **Review inbox**: split-pane, keyboard-first triage (`j`/`k`, `a`, `r`, `m`, `e`, `x`,
+  Shift+click ranges) with a bulk bar; a bottom sheet on phones.
+- **Command palette** (Ctrl/Cmd+K) and a shortcuts sheet (`?`); `g` + letter navigation.
+- Run metrics now include per-column null counts (analyses and pipeline runs), and analyses store
+  schema violations by rule.
+- `docs/design/references.md`: the design references and what was adopted from each.
+
+### Changed
+
+- Run detail and analysis results open on incidents; the data / findings table moved to a tab.
+- Calmer visual system: one accent, hairline borders, light elevation for floating surfaces,
+  Inter for text, motion of 200 ms or less (and none under reduced motion).
+
 ## [0.2.0] - 2026-11-13
 
 ### Added

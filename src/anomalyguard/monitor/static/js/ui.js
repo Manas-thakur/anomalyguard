@@ -62,6 +62,21 @@ const ICONS = {
   trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
   external: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
   thumbsdown: "M10 15H5a2 2 0 0 1-2-2.3l1.2-6A2 2 0 0 1 6.2 5H17v9l-4 6a2 2 0 0 1-3-1.7zM17 5h3v9h-3",
+  "bell-off": "M13.7 21a2 2 0 0 1-3.4 0M18 8a6 6 0 0 0-9.3-5M6.3 6.3A6 6 0 0 0 6 8c0 7-3 9-3 9h14M3 3l18 18",
+  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4",
+  up: "M12 19V5M6 11l6-6 6 6",
+  down: "M12 5v14M6 13l6 6 6-6",
+  flat: "M5 12h14",
+  edit: "M4 20h4L19 9l-4-4L4 16v4z",
+  moon: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z",
+  sun: "M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+  pulse: "M3 12h4l3-7 4 14 3-7h4",
+  runs: "M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01",
+  inbox: "M4 13 7 5h10l3 8v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 13h4.5l1 2h5l1-2H20",
+  pipeline: "M3 4h6v6H3zM15 14h6v6h-6zM9 7h3a3 3 0 0 1 3 3v4",
+  settings: "M4 7h9M17 7h3M4 17h3M11 17h9M15 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM9 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+  keyboard: "M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10",
+  hash: "M5 9h14M5 15h14M10 4 8 20M16 4l-2 16",
 };
 
 export function icon(name, cls = "icon") {
@@ -163,8 +178,8 @@ export function panel({ title, sub, actions, body, flush = false, cls }) {
     h("div", { class: flush ? "panel-body flush" : "panel-body" }, body));
 }
 
-export function kpis(items) {
-  return h("div", { class: "kpis" }, items.map((k) => h("div", { class: ["kpi", k.alert && "is-alert"] },
+export function kpis(items, { compact = false } = {}) {
+  return h("div", { class: ["kpis", compact && "compact"] }, items.map((k) => h("div", { class: ["kpi", k.alert && "is-alert"] },
     h("div", { class: "label" }, k.label),
     h("div", { class: "value" }, k.value),
     k.sub ? h("div", { class: "sub" }, k.sub) : null)));
@@ -250,6 +265,8 @@ export function toast(message, { kind, action, timeout = 5000 } = {}) {
     action ? h("button", { type: "button", onClick: () => { action.run(); el.remove(); } }, action.label) : null,
     h("button", { type: "button", "aria-label": "Dismiss", onClick: () => el.remove() }, icon("close")));
   box.append(el);
+  // keep the stack short: the oldest toasts go first
+  while (box.children.length > 3) box.firstElementChild.remove();
   if (timeout) setTimeout(() => el.remove(), timeout);
   return el;
 }
@@ -317,3 +334,30 @@ export function parseTyped(text) {
 }
 
 export function setTitle(text) { document.title = text ? `${text} · AnomalyGuard` : "AnomalyGuard"; }
+
+/** Accessible tab bar: { el, buttons, select(id) }. Arrow keys move between tabs. */
+export function tabBar(defs, current, onSelect) {
+  const buttons = {};
+  const el = h("div", { class: "tabs", role: "tablist" });
+  const select = (id) => {
+    for (const [k, b] of Object.entries(buttons)) {
+      b.setAttribute("aria-selected", String(k === id));
+      b.tabIndex = k === id ? 0 : -1;
+    }
+  };
+  defs.forEach((d, i) => {
+    const b = h("button", { role: "tab", type: "button", id: `tab-${d.id}`, "aria-selected": String(d.id === current), tabindex: d.id === current ? "0" : "-1" }, d.label);
+    b.addEventListener("click", () => { select(d.id); onSelect(d.id); });
+    b.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      e.preventDefault();
+      const next = defs[(i + (e.key === "ArrowRight" ? 1 : defs.length - 1)) % defs.length];
+      buttons[next.id].focus();
+      select(next.id);
+      onSelect(next.id);
+    });
+    buttons[d.id] = b;
+    el.append(b);
+  });
+  return { el, buttons, select };
+}

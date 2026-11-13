@@ -6,6 +6,7 @@ import {
   pageHead, panel, select, setTitle, timeEl, toast,
 } from "../ui.js";
 import { add } from "../ui.js";
+import { currentRoute, setQuery } from "../app.js";
 
 export function render(root, params) {
   if (params.id) return renderDetail(root, params.id);
@@ -52,6 +53,10 @@ function renderList(root) {
   root.append(head, slot);
   let dirs = null;
   newBtn.addEventListener("click", () => createDrawer(dirs, load));
+  if (currentRoute().query.new) {
+    setQuery({});
+    createDrawer(null, load);
+  }
 
   async function load() {
     try {

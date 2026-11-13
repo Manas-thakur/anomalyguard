@@ -518,6 +518,8 @@ class Workspace:
                 "freshness": q.get("freshness"),
                 "invalid_rows": q.get("invalid_rows"),
                 "duplicate_rows": q.get("duplicate_rows"),
+                "null_counts": q.get("null_counts") or {},
+                "violations": prof.get("validation", {}).get("by_rule") or {},
                 "alerts_sent": 0,
                 "cells_changed": 0,
                 "rows_dropped": 0,

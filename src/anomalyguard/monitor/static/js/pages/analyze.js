@@ -2,10 +2,11 @@
 
 import { api, waitForJob } from "../api.js";
 import { barList, histogram } from "../charts.js";
+import { incidentList } from "../incidents.js";
 import {
   busy, button, chip, clear, closePopover, emptyState, errorState, fmtBytes, fmtInt, fmtNum,
   fmtPct, fmtValue, h, icon, kpis, loading, pageHead, pager, panel, popover, segmented, select,
-  setTitle, timeEl, toast,
+  setTitle, tabBar, timeEl, toast,
 } from "../ui.js";
 import { add } from "../ui.js";
 import { currentRoute, refreshBadge, setQuery } from "../app.js";
@@ -221,7 +222,10 @@ function renderDataset(root, datasetId) {
 
   function configPanel(prof, detectors) {
     const sug = prof.suggestions;
-    const chosen = new Set(["mad", "iforest"]);
+    // a time-ordered file without natural groups is most likely a series: start
+    // with the seasonal and level-shift detectors as well
+    const series = sug.time_columns.length > 0 && sug.group_by.length === 0;
+    const chosen = new Set(series ? ["mad", "seasonal", "cusum"] : ["mad", "iforest"]);
     const opts = { group_by: sug.group_by.includes("region") ? "region" : "", sensitivity: "medium", combine: "any", time_column: sug.time_columns[0] || "", columns: [] };
     const byCat = {};
     for (const d of detectors) (byCat[d.category] ||= []).push(d);
@@ -295,7 +299,7 @@ function renderAnalysis(root, analysisId) {
   setTitle("Analysis");
   const q = currentRoute().query;
   const state = {
-    tab: q.tab === "fix" ? "fix" : "anomalies",
+    tab: ["fix", "data"].includes(q.tab) ? q.tab : "incidents",
     offset: Number(q.offset) || 0,
     limit: Number(q.limit) || 50,
     column: q.column || "",
@@ -333,7 +337,7 @@ function renderAnalysis(root, analysisId) {
 
   function sync() {
     setQuery({
-      tab: state.tab === "fix" ? "fix" : "", offset: state.offset || "", limit: state.limit === 50 ? "" : state.limit,
+      tab: state.tab === "incidents" ? "" : state.tab, offset: state.offset || "", limit: state.limit === 50 ? "" : state.limit,
       column: state.column, detector: state.detector, severity: state.severity, all: state.all ? "1" : "", sort: state.sort === "score" ? "" : state.sort,
     });
   }
@@ -342,19 +346,27 @@ function renderAnalysis(root, analysisId) {
     const sm = meta.summary;
     const o = meta.options;
     setTitle(`Analysis of ${meta.dataset}`);
-    const tabAnom = h("button", { role: "tab", "aria-selected": String(state.tab === "anomalies"), id: "tab-anom" }, "Anomalies");
-    const tabFix = h("button", { role: "tab", "aria-selected": String(state.tab === "fix"), id: "tab-fix" }, "Fix & export");
     const content = h("div", { role: "tabpanel" });
+    const incidents = meta.run_id ? incidentList(meta.run_id, {
+      focus: q.incident || null,
+      onCount: (n) => { badge.textContent = n ? String(n) : ""; badge.hidden = !n; },
+      onFilter: (column) => { state.column = column; state.offset = 0; tabs.select("data"); select_("data"); },
+    }) : null;
+    const badge = h("span", { class: "tab-count", hidden: true });
     const select_ = (t) => {
       state.tab = t;
-      tabAnom.setAttribute("aria-selected", String(t === "anomalies"));
-      tabFix.setAttribute("aria-selected", String(t === "fix"));
       sync();
       stepSlot.replaceChildren(steps(t === "fix" ? 5 : 4, { 1: "#/analyze", 2: `#/analyze/d/${meta.dataset_id}`, 3: `#/analyze/d/${meta.dataset_id}` }));
-      add(clear(content), t === "fix" ? fixView() : anomaliesView());
+      content.setAttribute("aria-labelledby", `tab-${t}`);
+      if (t === "incidents") content.replaceChildren(incidents ? incidents.el : emptyState({ title: "No run recorded" }));
+      else add(clear(content), t === "fix" ? fixView() : anomaliesView());
     };
-    tabAnom.addEventListener("click", () => select_("anomalies"));
-    tabFix.addEventListener("click", () => select_("fix"));
+    const tabs = tabBar([
+      { id: "incidents", label: "Incidents" },
+      { id: "data", label: "Data" },
+      { id: "fix", label: "Fix & export" },
+    ], state.tab, select_);
+    tabs.buttons.incidents.append(badge);
     const stepSlot = h("div");
     add(clear(body), 
       pageHead({
@@ -374,7 +386,7 @@ function renderAnalysis(root, analysisId) {
         { label: "High severity", value: fmtInt(meta.breakdown?.by_severity?.high ?? 0), sub: "score at least 3x threshold" },
         { label: "Columns affected", value: fmtInt(Object.keys(sm.anomalies_by_column || {}).filter((c) => c !== "(row)").length) },
       ]),
-      h("div", { class: "tabs", role: "tablist" }, tabAnom, tabFix),
+      tabs.el,
       content,
     );
     select_(state.tab);
@@ -449,7 +461,7 @@ function renderAnalysis(root, analysisId) {
     return h("div", { class: "stack" },
       h("div", { class: "grid grid-2" },
         panel({ title: "Findings by column", sub: "Click a bar to filter the table", body: barList(toBars(bd.by_column, "column"), { format: fmtInt }) }),
-        panel({ title: "Findings by detector", sub: "Grouped detectors are fitted per group", body: barList(toBars(bd.by_detector, "detector"), { format: fmtInt, color: "var(--series-2)" }) })),
+        panel({ title: "Findings by detector", sub: "Grouped detectors are fitted per group", body: barList(toBars(bd.by_detector, "detector"), { format: fmtInt }) })),
       h("section", { class: "panel" },
         h("div", { class: "panel-head" },
           h("div", null, h("h2", null, "Data"), h("p", null, "Flagged cells are tinted by severity. Hover for the reason, click for details and feedback.")),

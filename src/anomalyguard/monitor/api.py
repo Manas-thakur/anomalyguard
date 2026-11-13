@@ -23,6 +23,8 @@ from anomalyguard import __version__
 from anomalyguard.monitor import doctor
 from anomalyguard.monitor.catalog import PipelineCatalog, templates
 from anomalyguard.monitor.feedback import FeedbackLoop
+from anomalyguard.monitor.incidents import IncidentEngine
+from anomalyguard.monitor.incidents import _num as number
 from anomalyguard.monitor.jobs import JobManager
 from anomalyguard.monitor.settings import ServerSettings
 from anomalyguard.monitor.store import ANALYSIS_PREFIX, DEFAULT_DB, MetricsStore
@@ -41,6 +43,8 @@ OPEN_API_PATHS = {"/api/auth"}
 NON_DETECTOR_SOURCES = {"missing", "type", "schema"}
 BULK_ACTIONS = {"approve", "reject", "apply", "false_positive"}
 MAX_BULK = 10_000
+TRIAGE_ACTIONS = {"normal", "confirm", "reopen"}
+MAX_TRIAGE_FINDINGS = 1000
 CHUNK = 1024 * 1024
 
 
@@ -99,6 +103,26 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
     workspace = Workspace(state_dir, store, queue)
     catalog = PipelineCatalog(settings.pipeline_dirs, store, state_dir)
 
+    def _data_roots() -> list[Path]:
+        dirs = [d.resolve() for d in settings.pipeline_dirs]
+        return [Path.cwd(), state_dir, *dirs, *[d.parent for d in dirs]]
+
+    def _load_frame(run: dict[str, Any]) -> tuple[Any, str | None]:
+        """The data a run looked at: an analysis's upload, or a pipeline's source file."""
+        m = run.get("metrics") or {}
+        if m.get("dataset_id"):
+            return workspace.load(m["dataset_id"]), (m.get("options") or {}).get("time_column")
+        src = m.get("source")
+        if src:
+            from anomalyguard.ingest.factory import read_any
+
+            path = Path(str(src))
+            if path.is_file() and _within(path, _data_roots()):
+                return read_any(path), None
+        return None, None
+
+    incidents = IncidentEngine(store, _load_frame)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
@@ -117,6 +141,7 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
     app.state.jobs = jobs
     app.state.workspace = workspace
     app.state.catalog = catalog
+    app.state.incidents = incidents
     app.state.settings = settings
 
     # -- middleware: API key + security headers (CORS is added last = outermost)
@@ -302,6 +327,137 @@ def create_app(db_path: str | Path = DEFAULT_DB, settings: ServerSettings | None
         limit: int = Query(100, ge=1, le=1000), run_id: int | None = None
     ) -> list[dict[str, Any]]:
         return store.alerts(limit, run_id=run_id)
+
+    # -- incidents --------------------------------------------------------------
+    @app.get("/api/health/overview")
+    def health_overview() -> dict[str, Any]:
+        """Every monitored source with status, quality trend and open incidents, plus KPIs."""
+        return jsonable(incidents.health())
+
+    @app.get("/api/incidents")
+    def recent_incidents(
+        limit: int = Query(20, ge=1, le=200), include_muted: bool = False
+    ) -> list[dict[str, Any]]:
+        """Incidents of the most recent successful runs, newest run first."""
+        return jsonable(incidents.recent(limit=limit, include_muted=include_muted))
+
+    @app.get("/api/incidents/mutes")
+    def list_mutes() -> list[dict[str, Any]]:
+        return store.mutes()
+
+    @app.delete("/api/incidents/mutes/{mute_id}")
+    def delete_mute(mute_id: int) -> dict[str, Any]:
+        if not store.unmute(mute_id):
+            raise HTTPException(404, f"Mute {mute_id} not found")
+        return {"deleted": mute_id}
+
+    @app.get("/api/runs/{run_id}/incidents")
+    def run_incidents(run_id: int, include_muted: bool = False) -> dict[str, Any]:
+        """Findings grouped into incidents (by column and kind), most severe first.
+
+        Muted incidents are left out unless ``include_muted=true``; ``muted`` counts them.
+        """
+        _run_or_404(run_id)
+        return jsonable(incidents.for_run(run_id, include_muted=include_muted))
+
+    def _incident_or_404(run_id: int, inc_id: str) -> dict[str, Any]:
+        _run_or_404(run_id)
+        try:
+            return incidents.get(run_id, inc_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc.args[0])) from exc
+
+    @app.get("/api/runs/{run_id}/incidents/{inc_id}/chart")
+    def incident_chart(run_id: int, inc_id: str) -> dict[str, Any]:
+        """Chart data: a distribution or time series with the expected band, or run history."""
+        _incident_or_404(run_id, inc_id)
+        return jsonable(incidents.chart(run_id, inc_id))
+
+    @app.post("/api/runs/{run_id}/incidents/{inc_id}/triage")
+    def triage_incident(
+        run_id: int, inc_id: str, payload: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        """``{"action": "normal" | "confirm" | "reopen", "note": ...}``.
+
+        ``normal`` records every finding as a false positive (so tuning raises the
+        detector's threshold) and rejects matching pending review items.
+        ``confirm`` records true positives and queues the flagged cells for review.
+        """
+        inc = _incident_or_404(run_id, inc_id)
+        action = payload.get("action")
+        if action not in TRIAGE_ACTIONS:
+            raise HTTPException(422, f"action must be one of {sorted(TRIAGE_ACTIONS)}")
+        note = payload.get("note") or None
+        if action == "reopen":
+            return {"incident": jsonable(incidents.triage(run_id, inc_id, None, note))}
+        findings = incidents.findings(run_id, inc_id)[:MAX_TRIAGE_FINDINGS]
+        label = "false_positive" if action == "normal" else "true_positive"
+        tag = note or f"incident: {inc['title'].lower()}"
+        out: dict[str, Any] = {"feedback": 0, "queued": 0, "rejected": 0}
+        for f in findings:
+            if f["detector"] in NON_DETECTOR_SOURCES:
+                continue
+            loop.mark(label, anomaly_id=f["id"], note=tag)
+            out["feedback"] += 1
+        rows = {repr(f["row_index"]) for f in findings}
+        if action == "normal" and inc["column"]:
+            pending, _ = queue.query(
+                status="pending", run_id=run_id, column=inc["column"], limit=MAX_BULK
+            )
+            for item in pending:
+                if repr(item["row_index"]) in rows:
+                    queue.reject(item["id"], note=note or "marked normal")
+                    out["rejected"] += 1
+        if action == "confirm" and inc["column"]:
+            exp = inc.get("expected") or {}
+            best: dict[str, dict[str, Any]] = {}
+            for f in findings:
+                key = repr(f["row_index"])
+                if key not in best or (f["score"] or 0) > (best[key]["score"] or 0):
+                    best[key] = f
+            flagged = []
+            for f in list(best.values())[:500]:
+                suggestion = None
+                v = f.get("value")
+                num = number(v)
+                lo, hi = exp.get("low"), exp.get("high")
+                if (
+                    inc["kind"] == "outlier"
+                    and num is not None
+                    and None not in (lo, hi)
+                    and not lo <= num <= hi
+                ):
+                    suggestion = round(min(max(num, lo), hi), 4)
+                flagged.append(
+                    {
+                        "index": f["row_index"],
+                        "column": f["column"],
+                        "value": v,
+                        "reason": f["reason"],
+                        "detector": f["detector"],
+                        "suggestion": suggestion,
+                    }
+                )
+            ids = queue.add_flagged(flagged, pipeline=inc["pipeline"], run_id=run_id)
+            out["queued"] = len(set(ids))
+        status = "normal" if action == "normal" else "confirmed"
+        out["incident"] = jsonable(incidents.triage(run_id, inc_id, status, note))
+        out["review"] = queue.counts()
+        return out
+
+    @app.post("/api/runs/{run_id}/incidents/{inc_id}/mute")
+    def mute_incident(
+        run_id: int, inc_id: str, payload: dict[str, Any] | None = Body(None)
+    ) -> dict[str, Any]:
+        """Hide this kind of incident on this source and column (``{"hours": 24}``)."""
+        _incident_or_404(run_id, inc_id)
+        try:
+            hours = float((payload or {}).get("hours", 24))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "hours must be a number") from exc
+        if not 0 < hours <= 24 * 30:
+            raise HTTPException(422, "hours must be between 0 and 720")
+        return incidents.mute(run_id, inc_id, hours, (payload or {}).get("note"))
 
     # -- review queue -----------------------------------------------------------
     @app.get("/api/review")

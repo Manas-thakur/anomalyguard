@@ -233,6 +233,7 @@ class PipelineExecutor:
             freshness=quality.freshness,
             invalid_rows=quality.invalid_rows,
             duplicate_rows=quality.duplicate_rows,
+            null_counts=quality.null_counts,
             violations=quality.violations,
             cells_changed=remediation.n_changed_cells if remediation else 0,
             rows_dropped=len(remediation.dropped) if remediation else 0,

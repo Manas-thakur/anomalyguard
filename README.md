@@ -6,17 +6,18 @@
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-AnomalyGuard reads data from files, databases, APIs or streams. It validates the data against a schema, finds anomalies with statistical, ML, time-series and contextual detectors, and fixes what is safe to fix. Anything it can't fix safely goes to a human review queue. It sends alerts when quality drops and records every run, and a web app lets you upload a file, see every anomaly with its reason, preview fixes, download the cleaned data, work through the review queue and run pipelines. False-positive feedback adjusts detector thresholds.
+AnomalyGuard reads data from files, databases, APIs or streams. It validates the data against a schema, finds anomalies with statistical, ML, time-series and contextual detectors, and fixes what is safe to fix. Anything it can't fix safely goes to a human review queue. It sends alerts when quality drops and records every run, and a web app groups findings into incidents with expected ranges, shows the health of every source, lets you upload a file, preview fixes, download the cleaned data, work through a keyboard-driven review inbox and run pipelines. False-positive feedback adjusts detector thresholds.
 
-![Analysis results: anomalous cells tinted by severity, with findings by column and detector](docs/screenshots/analyze-results.png)
+![A pipeline run's incidents: values higher than expected, with the expected range shaded and the flagged values marked](docs/screenshots/incidents.png)
 
 ## Features
 
 - **Analyze a file in the browser.** Drag in a CSV, TSV, JSON, JSONL or Parquet file, get an inferred schema, per-column statistics and a quality score, pick detectors (optionally per group, for contextual anomalies) and a sensitivity, and browse the data with every anomalous cell highlighted and explained.
 - **Preview fixes before you take them.** Choose a strategy per column (cap, winsorize, median, flag, drop, ...), see a before/after diff of every changed cell, then download the cleaned CSV and a Markdown or JSON report.
-- **Review queue that scales.** Server-side paging and filters, select-all, bulk approve / reject / apply / mark false positive, and a drawer with the full row and an editable final value.
+- **Incidents, not walls of findings.** Findings are grouped by source, column and kind, with a plain-language tag, expected range vs actual value, a chart with the expected band, and inline *Mark as normal* / *Confirm* / *Mute 24h*.
+- **A review inbox that scales.** Keyboard-first split view (j/k, a, r, m, e, x), server-side paging and filters, select-all, and bulk approve / reject / apply / mark false positive.
 - **Pipelines.** Declarative YAML pipelines (source, schema, detectors, remediation, alerts, sink, schedule), runnable from the CLI, a scheduler, or the web app as background jobs.
-- **Monitoring.** Every run and analysis is recorded in SQLite; the overview charts anomaly rate and quality over time per pipeline, and alerts go to the console, files, webhooks, Slack or email.
+- **Monitoring.** Every run and analysis is recorded in SQLite. The Health page shows each source's status, quality trend and open incidents, and alerts go to the console, files, webhooks, Slack or email.
 - **From-scratch algorithms.** Isolation Forest, LOF, k-NN, Grubbs, CUSUM, EWMA and seasonal decomposition in plain NumPy.
 
 ## Philosophy
@@ -392,20 +393,24 @@ The optional `LLMSuggester` sends the full record and the problem to Ollama (`/a
 
 ## Web app
 
-`anomalyguard serve` starts a FastAPI app that serves the web app (plain HTML, CSS and ES modules in `src/anomalyguard/monitor/static/`, no build step, no JavaScript from a CDN) and the REST API. It follows the system light/dark preference, with a toggle in the sidebar, and works down to phone width.
+`anomalyguard serve` starts a FastAPI app that serves the web app and the REST API. The web app is plain HTML, CSS and ES modules in `src/anomalyguard/monitor/static/`, with no build step and no JavaScript from a CDN. It follows the system light/dark preference (with a toggle), works down to phone width, and can be driven from the keyboard: **Ctrl/Cmd+K** opens a command palette and **?** lists the shortcuts.
 
 | Page | What you can do |
 |---|---|
-| **Overview** | Totals, anomaly rate and quality score over time (one series per pipeline, real time axis), recent runs and alerts |
-| **Analyze** | Upload a file, profile it, choose detectors / group-by / sensitivity, browse highlighted results, preview remediation per column, download the cleaned CSV and reports, send flagged values to review |
-| **Runs** | Filter every run and analysis; open a run for KPIs, findings by column and detector, a sortable anomaly table with feedback buttons, remediation summary, alerts sent and artifact downloads |
-| **Review queue** | Page and filter items by status, source, column and detector; select all matching items; bulk approve, reject, apply or mark as false positive; edit the final value in the item drawer |
+| **Health** | Open incidents, sources monitored, average quality and rows scanned. Below them, one row per pipeline or analysed file with a status dot, a quality sparkline, a trend arrow, open incidents and the last run, a feed of recent incidents, and quality / anomaly-rate trends |
+| **Runs** | Filter every run and analysis. A run opens on its **incidents**; the sortable findings table, remediation, alerts and artifact downloads are in the other tabs |
+| **Review inbox** | A split view with the list on the left and the item on the right. `j`/`k` move, `a` approve, `r` reject, `m` mark as normal, `e` edit the value, `x` select, Shift+click selects a range. A bulk bar acts on the selection or on every matching item. On a phone the item opens as a sheet |
+| **Analyze** | Upload a file or start from a sample, profile it, choose detectors / group-by / sensitivity, then see incidents first, the highlighted data table second, and *Fix & export* (per-column remediation, cleaned CSV and reports, send flagged values to review) |
 | **Pipelines** | List pipeline YAML files, edit and validate them, run one now as a background job, create a pipeline from a template |
 | **Settings** | Server configuration, API key status, detector threshold multipliers and tuning, notifier and environment status |
 
-| Overview (dark) | Review queue |
+**Incidents.** Findings are grouped by source, column and kind, and each group is shown as a card. A card has a plain-language tag ("Values higher than expected", "Missing values spiked", "Duplicate rows", "Level shift detected", ...), a one-sentence explanation, and the expected range next to the actual value with the change. The expected range is median ± 3.5 robust standard deviations for a column, or trend + seasonality ± the same band for a time series. Each card also has a chart with that band shaded and the flagged values marked. **Mark as normal** records false-positive feedback for every finding. **Confirm** records true positives and queues the flagged cells for review. **Mute 24h** hides that kind of incident on that source and column, including on later runs. The design references behind this are in [docs/design/references.md](docs/design/references.md).
+
+| Health | Review inbox |
 |---|---|
-| ![Overview with anomaly rate and quality charts](docs/screenshots/overview.png) | ![Review queue with filters](docs/screenshots/review-queue.png) |
+| ![Health overview: KPIs, sources with quality sparklines and trend arrows, recent incidents](docs/screenshots/health.png) | ![Review inbox: list with a selection and the bulk bar, item detail on the right](docs/screenshots/review-inbox.png) |
+| **Time-series incident (dark)** | **Command palette** |
+| ![A temperature series with its expected band; readings outside it are marked](docs/screenshots/incidents-timeseries.png) | ![Command palette with sample analyses, runs and pipelines](docs/screenshots/command-palette.png) |
 
 Uploaded files and analysis artifacts live under the state directory (`.anomalyguard/uploads/` and `.anomalyguard/analyses/`). Every analysis is also recorded as a run named `analysis:<file>`, so it shows up next to pipeline runs and its findings take part in the feedback loop.
 
@@ -428,6 +433,13 @@ OpenAPI docs are served at `/api/docs`. When `ANOMALYGUARD_API_KEY` is set, ever
 | GET | `/api/runs/{id}/anomalies?limit=&offset=&column=&detector=&severity=&sort=&order=` | stored findings |
 | GET | `/api/runs/{id}/artifacts/{name}` | download a run output (cleaned data, reports) |
 | GET | `/api/alerts?run_id=` | recent alerts |
+| GET | `/api/runs/{id}/incidents?include_muted=` | findings grouped into incidents with expected vs actual, most severe first |
+| GET | `/api/runs/{id}/incidents/{incident}/chart` | chart data: distribution or time series with the expected band, or run history |
+| POST | `/api/runs/{id}/incidents/{incident}/triage` | `{"action": "normal" \| "confirm" \| "reopen"}` |
+| POST | `/api/runs/{id}/incidents/{incident}/mute` | `{"hours": 24}`: mute this kind of incident on this source and column |
+| GET / DELETE | `/api/incidents/mutes`, `/api/incidents/mutes/{id}` | active mutes; unmute |
+| GET | `/api/incidents?limit=&include_muted=` | incidents of the most recent runs (the Health feed) |
+| GET | `/api/health/overview` | per-source health rows and KPIs |
 | POST | `/api/datasets` | upload a file (multipart field `file`) |
 | GET / DELETE | `/api/datasets`, `/api/datasets/{id}` | list, inspect or delete uploads |
 | GET | `/api/datasets/{id}/profile`, `/api/datasets/{id}/rows` | profile and raw rows |
@@ -493,7 +505,7 @@ src/anomalyguard/
   remediate/   strategies.py, pipeline.py, review.py, llm.py, report.py
   alert/       base.py, notifiers.py, rules.py, manager.py
   monitor/     store.py, feedback.py, api.py (FastAPI), workspace.py (uploads, analyses), jobs.py,
-               catalog.py (pipeline files), settings.py, doctor.py,
+               catalog.py (pipeline files), incidents.py (incidents, bands, health), settings.py, doctor.py,
                static/ (index.html, css/app.css, js/ modules: no build step)
   pipeline/    config.py, executor.py, scheduler.py, state.py, sinks.py, templates.py
   demo/        generator.py, benchmark.py

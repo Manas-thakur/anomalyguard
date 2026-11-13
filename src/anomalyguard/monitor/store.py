@@ -76,6 +76,30 @@ CREATE TABLE IF NOT EXISTS thresholds (
     reason TEXT,
     last_feedback_id INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS incident_cache (
+    run_id INTEGER PRIMARY KEY,
+    version INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS incident_triage (
+    run_id INTEGER NOT NULL,
+    incident_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    note TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, incident_id)
+);
+CREATE TABLE IF NOT EXISTS incident_mutes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline TEXT NOT NULL,
+    column_name TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    until TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    note TEXT,
+    UNIQUE (pipeline, column_name, kind)
+);
 """
 
 RUN_FIELDS = (
@@ -294,6 +318,16 @@ class MetricsStore:
             ).fetchone()
         return self._run_row(r) if r else None
 
+    def previous_run(self, pipeline: str, before_id: int) -> dict[str, Any] | None:
+        """The last successful run of ``pipeline`` before run ``before_id`` (with metrics)."""
+        with closing(self._conn()) as conn:
+            r = conn.execute(
+                "SELECT id FROM runs WHERE pipeline = ? AND status = 'success' AND id < ?"
+                " ORDER BY id DESC LIMIT 1",
+                (pipeline, before_id),
+            ).fetchone()
+        return self.get_run(int(r[0])) if r else None
+
     def pipelines(self) -> list[str]:
         with closing(self._conn()) as conn:
             return [
@@ -453,6 +487,19 @@ class MetricsStore:
             "rows": sev[4] or 0,
         }
 
+    def anomaly_groups(self, run_id: int) -> list[dict[str, Any]]:
+        """Stored findings per (column, detector): count, distinct rows and top score."""
+        with closing(self._conn()) as conn:
+            rows = conn.execute(
+                "SELECT column_name, detector, COUNT(*), COUNT(DISTINCT row_index), MAX(score)"
+                " FROM anomalies WHERE run_id = ? GROUP BY 1, 2",
+                (run_id,),
+            ).fetchall()
+        return [
+            {"column": c, "detector": d, "count": n, "rows": r, "max_score": m}
+            for c, d, n, r, m in rows
+        ]
+
     def get_anomaly(self, anomaly_id: int) -> dict[str, Any] | None:
         with closing(self._conn()) as conn:
             r = conn.execute("SELECT * FROM anomalies WHERE id = ?", (anomaly_id,)).fetchone()
@@ -570,6 +617,84 @@ class MetricsStore:
                 dict(r)
                 for r in conn.execute("SELECT * FROM thresholds ORDER BY detector").fetchall()
             ]
+
+    # -- incidents --------------------------------------------------------
+    def cached_incidents(self, run_id: int, version: int) -> list[dict[str, Any]] | None:
+        with closing(self._conn()) as conn:
+            r = conn.execute(
+                "SELECT data FROM incident_cache WHERE run_id = ? AND version = ?",
+                (run_id, version),
+            ).fetchone()
+        return json.loads(r[0]) if r else None
+
+    def cache_incidents(self, run_id: int, version: int, incidents: list[dict[str, Any]]) -> None:
+        with closing(self._conn()) as conn, conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO incident_cache (run_id, version, created_at, data)"
+                " VALUES (?, ?, ?, ?)",
+                (run_id, version, now_iso(), json.dumps(incidents, default=str)),
+            )
+
+    def triage(self, run_ids: list[int]) -> dict[tuple[int, str], dict[str, Any]]:
+        if not run_ids:
+            return {}
+        marks = ",".join("?" * len(run_ids))
+        with closing(self._conn()) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM incident_triage WHERE run_id IN ({marks})", run_ids
+            ).fetchall()
+        return {(r["run_id"], r["incident_id"]): dict(r) for r in rows}
+
+    def set_triage(
+        self, run_id: int, incident_id: str, status: str | None, note: str | None
+    ) -> None:
+        with closing(self._conn()) as conn, conn:
+            if status is None:
+                conn.execute(
+                    "DELETE FROM incident_triage WHERE run_id = ? AND incident_id = ?",
+                    (run_id, incident_id),
+                )
+                return
+            conn.execute(
+                "INSERT OR REPLACE INTO incident_triage (run_id, incident_id, status, note, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (run_id, incident_id, status, note, now_iso()),
+            )
+
+    def mute(
+        self, pipeline: str, column: str | None, kind: str, until: str, note: str | None = None
+    ) -> dict[str, Any]:
+        with closing(self._conn()) as conn, conn:
+            conn.execute(
+                "INSERT INTO incident_mutes (pipeline, column_name, kind, until, created_at, note)"
+                " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(pipeline, column_name, kind) DO UPDATE SET"
+                " until = excluded.until, created_at = excluded.created_at, note = excluded.note",
+                (pipeline, column or "", kind, until, now_iso(), note),
+            )
+            r = conn.execute(
+                "SELECT * FROM incident_mutes WHERE pipeline = ? AND column_name = ? AND kind = ?",
+                (pipeline, column or "", kind),
+            ).fetchone()
+        return self._mute_row(r)
+
+    @staticmethod
+    def _mute_row(r: sqlite3.Row) -> dict[str, Any]:
+        d = dict(r)
+        d["column"] = d.pop("column_name") or None
+        return d
+
+    def mutes(self, active_only: bool = True) -> list[dict[str, Any]]:
+        q, params = "SELECT * FROM incident_mutes", []
+        if active_only:
+            q += " WHERE until > ?"
+            params.append(now_iso())
+        with closing(self._conn()) as conn:
+            rows = conn.execute(q + " ORDER BY until DESC", params).fetchall()
+        return [self._mute_row(r) for r in rows]
+
+    def unmute(self, mute_id: int) -> bool:
+        with closing(self._conn()) as conn, conn:
+            return conn.execute("DELETE FROM incident_mutes WHERE id = ?", (mute_id,)).rowcount > 0
 
     # -- summary ----------------------------------------------------------
     def summary(self) -> dict[str, Any]:
